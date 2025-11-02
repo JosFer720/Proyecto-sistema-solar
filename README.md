@@ -1,0 +1,7 @@
+ACERCAR NAVE: W
+ALEJAR NAVE: S
+GIRAR IZQUIERDA: A
+GIRAR DERECHA: D
+
+
+![alt text](navepintada.png)
