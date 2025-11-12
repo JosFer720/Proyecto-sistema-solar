@@ -14,13 +14,27 @@ use std::io::Cursor;
 const SCREEN_WIDTH: u32 = 800;
 const SCREEN_HEIGHT: u32 = 600;
 
-// Z-buffer para almacenar la profundidad de cada píxel
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+enum ShaderType {
+    Sun,
+    RockyPlanet,  // Planeta rocoso tipo Tierra
+    Venus,        // Planeta Venus - amarillo/naranja con atmósfera densa
+    Mars,         // Planeta Marte - rojo/oxidado
+    Moon,         // Luna de la Tierra - gris rocoso con cráteres
+    Jupiter,      // Júpiter - gigante gaseoso con bandas
+    Uranus,       // Urano - gigante de hielo azul-verde
+    Neptune,      // Neptuno - gigante de hielo azul oscuro
+    Spaceship,    // Para mantener la nave comentada pero funcional
+}
+
 struct ZBuffer {
     buffer: Vec<f32>,
     width: usize,
     height: usize,
 }
 
+#[allow(dead_code)]
 impl ZBuffer {
     fn new(width: usize, height: usize) -> Self {
         ZBuffer {
@@ -48,7 +62,708 @@ impl ZBuffer {
     }
 }
 
+fn hash(x: f32, y: f32) -> f32 {
+    let n = (x * 12.9898 + y * 78.233).sin() * 43758.5453;
+    n - n.floor()
+}
+
+fn noise(x: f32, y: f32) -> f32 {
+    let i = x.floor();
+    let j = y.floor();
+    let f_x = x - i;
+    let f_y = y - j;
+    
+    let u = f_x * f_x * (3.0 - 2.0 * f_x);
+    let v = f_y * f_y * (3.0 - 2.0 * f_y);
+    
+    let a = hash(i, j);
+    let b = hash(i + 1.0, j);
+    let c = hash(i, j + 1.0);
+    let d = hash(i + 1.0, j + 1.0);
+    
+    a * (1.0 - u) * (1.0 - v) + 
+    b * u * (1.0 - v) + 
+    c * (1.0 - u) * v + 
+    d * u * v
+}
+
+fn apply_shader(
+    shader_type: ShaderType,
+    vertex_position: Vec3,  // Posición del vértice en espacio del modelo
+    normal: Vec3,           // Normal del triángulo
+    intensity: f32,         // Intensidad de luz base
+    time: f32,              // Tiempo para animaciones
+) -> (u8, u8, u8) {
+    match shader_type {
+        ShaderType::Sun => {
+            // ===== SHADER DEL SOL =====
+            // Sistema de 5 capas para máxima complejidad
+            
+            let position = vertex_position;
+            
+            // Convertir a coordenadas esféricas para patterns
+            let radius = (position.x * position.x + position.y * position.y + position.z * position.z).sqrt();
+            let theta = position.y.atan2((position.x * position.x + position.z * position.z).sqrt()); // latitud
+            let phi = position.z.atan2(position.x); // longitud
+            
+            // CAPA 1: Color base - Gradiente de núcleo (amarillo-naranja-rojo)
+            let core_distance = radius.max(0.01);
+            let core_gradient = (1.0 - (core_distance / 2.0).min(1.0)).max(0.0);
+            
+            let base_r = 255.0;
+            let base_g = 180.0 + core_gradient * 50.0;
+            let base_b = 20.0 + core_gradient * 30.0;
+            
+            // CAPA 2: Manchas solares (patrones oscuros)
+            let spot_freq = 3.0;
+            let spot_noise = noise(phi * spot_freq + time * 0.1, theta * spot_freq);
+            let spot_noise2 = noise(phi * spot_freq * 2.0 - time * 0.15, theta * spot_freq * 2.0);
+            let combined_spots = (spot_noise + spot_noise2 * 0.5) / 1.5;
+            
+            // Umbral para manchas oscuras
+            let spot_factor = if combined_spots > 0.65 { 
+                0.6 // Mancha oscura
+            } else { 
+                1.0 
+            };
+            
+            // CAPA 3: Efecto de llamaradas (áreas más brillantes que se mueven)
+            let flare_noise = noise(phi * 2.0 + time * 0.3, theta * 2.0 + time * 0.2);
+            let flare_factor = if flare_noise > 0.7 {
+                1.0 + (flare_noise - 0.7) * 2.0 // Brightening
+            } else {
+                1.0
+            };
+            
+            // CAPA 4: Pulsación temporal (respiración del sol)
+            let pulse = ((time * 2.0).sin() * 0.5 + 0.5) * 0.15 + 0.85; // Oscila entre 0.85 y 1.0
+            
+            // CAPA 5: Turbulencia en la superficie
+            let turb_noise = noise(phi * 8.0 + time * 0.5, theta * 8.0 - time * 0.3);
+            let turb_factor = 0.9 + turb_noise * 0.2; // Pequeñas variaciones
+            
+            // CAPA 6: Efecto de corona/borde brillante
+            let edge_factor = 1.0 - normal.dot(Vec3::new(0.0, 0.0, 1.0)).abs();
+            let corona = edge_factor * edge_factor * 0.3;
+            
+            // Combinar todas las capas
+            let r = (base_r * spot_factor * flare_factor * pulse * turb_factor * (0.7 + 0.3 * intensity) + corona * 100.0).min(255.0);
+            let g = (base_g * spot_factor * flare_factor * pulse * turb_factor * (0.7 + 0.3 * intensity) + corona * 80.0).min(255.0);
+            let b = (base_b * spot_factor * pulse * turb_factor * (0.7 + 0.3 * intensity) + corona * 20.0).min(255.0);
+            
+            (r as u8, g as u8, b as u8)
+        },
+        
+        ShaderType::RockyPlanet => {
+            // ===== SHADER DE PLANETA ROCOSO =====
+            // Sistema de 5 capas multicolor tipo Tierra
+            
+            let position = vertex_position;
+            
+            // Convertir a coordenadas esféricas
+            let theta = position.y.atan2((position.x * position.x + position.z * position.z).sqrt()); // latitud
+            let phi = position.z.atan2(position.x); // longitud
+            
+            // Normalizar latitud a rango [0, 1]
+            let lat = (theta / std::f32::consts::PI) + 0.5; // 0 = polo sur, 1 = polo norte, 0.5 = ecuador
+            
+            // CAPA 1: Base de terreno/océano
+            // Usar noise para determinar tierra vs agua
+            let land_noise = noise(phi * 5.0 + time * 0.05, theta * 5.0);
+            let land_noise2 = noise(phi * 10.0 - time * 0.03, theta * 10.0 + 100.0);
+            let is_land = (land_noise * 0.6 + land_noise2 * 0.4) > 0.48; // Más océano, menos tierra (como la Tierra real)
+            
+            // Colores realistas de la Tierra
+            let ocean_color = (10.0, 50.0, 120.0);      // Azul océano profundo
+            let shallow_ocean = (30.0, 80.0, 150.0);    // Azul océano poco profundo
+            let land_color = (34.0, 139.0, 34.0);       // Verde bosque (forest green)
+            let desert_color = (210.0, 180.0, 140.0);   // Beige/tan desierto
+            let mountain_color = (139.0, 137.0, 137.0); // Gris montaña/roca
+            
+            let (mut base_r, mut base_g, mut base_b) = if is_land {
+                // Variar el tipo de tierra según latitud y noise
+                let terrain_variation = noise(phi * 3.0, theta * 3.0 + 50.0);
+                
+                if lat > 0.75 || lat < 0.25 {
+                    // Zonas polares - hielo/nieve (se renderizará más adelante)
+                    (240.0, 240.0, 255.0)
+                } else if terrain_variation > 0.65 {
+                    // Montañas y zonas rocosas
+                    mountain_color
+                } else if (lat > 0.35 && lat < 0.42) || (lat > 0.58 && lat < 0.65) {
+                    // Desiertos subtropicales (Sahara, etc.)
+                    desert_color
+                } else {
+                    // Tierra fértil - bosques y vegetación
+                    let green_variation = terrain_variation * 20.0;
+                    (
+                        land_color.0 + green_variation,
+                        land_color.1 + green_variation,
+                        land_color.2 + green_variation * 0.5
+                    )
+                }
+            } else {
+                // Océano con variación de profundidad
+                let depth_noise = noise(phi * 8.0, theta * 8.0 + 200.0);
+                if depth_noise > 0.6 {
+                    // Océano poco profundo (cerca de costas)
+                    shallow_ocean
+                } else {
+                    // Océano profundo
+                    let depth_factor = 0.8 + depth_noise * 0.2;
+                    (
+                        ocean_color.0 * depth_factor,
+                        ocean_color.1 * depth_factor,
+                        ocean_color.2 * depth_factor
+                    )
+                }
+            };
+            
+            // CAPA 2: Casquetes polares (blanco brillante) - MÁS GRANDES Y REALISTAS
+            let polar_threshold = 0.80; // Más grandes que antes (era 0.85)
+            let polar_factor = if lat > polar_threshold {
+                // Polo norte
+                ((lat - polar_threshold) / (1.0 - polar_threshold)).powf(0.4) // Más suave
+            } else if lat < (1.0 - polar_threshold) {
+                // Polo sur
+                ((1.0 - polar_threshold - lat) / (1.0 - polar_threshold)).powf(0.4)
+            } else {
+                0.0
+            };
+            
+            if polar_factor > 0.0 {
+                let snow_white = 255.0;
+                let ice_blue_tint = 0.95; // Ligero tinte azul del hielo
+                base_r = base_r * (1.0 - polar_factor) + snow_white * polar_factor;
+                base_g = base_g * (1.0 - polar_factor) + snow_white * polar_factor;
+                base_b = base_b * (1.0 - polar_factor) + (snow_white * ice_blue_tint) * polar_factor;
+            }
+            
+            // CAPA 3: Nubes (blancas semi-transparentes)
+            let cloud_noise1 = noise(phi * 6.0 + time * 0.3, theta * 6.0);
+            let cloud_noise2 = noise(phi * 12.0 - time * 0.2, theta * 12.0 + 300.0);
+            let cloud_combined = cloud_noise1 * 0.6 + cloud_noise2 * 0.4;
+            
+            let cloud_factor = if cloud_combined > 0.6 {
+                ((cloud_combined - 0.6) / 0.4).min(1.0) * 0.7 // Opacidad máxima 70%
+            } else {
+                0.0
+            };
+            
+            if cloud_factor > 0.0 {
+                let cloud_white = 240.0;
+                base_r = base_r * (1.0 - cloud_factor) + cloud_white * cloud_factor;
+                base_g = base_g * (1.0 - cloud_factor) + cloud_white * cloud_factor;
+                base_b = base_b * (1.0 - cloud_factor) + cloud_white * cloud_factor;
+            }
+            
+            // CAPA 4: Atmósfera (brillo azul en los bordes)
+            let edge_factor = 1.0 - normal.dot(Vec3::new(0.0, 0.0, 1.0)).abs();
+            let atmosphere = edge_factor * edge_factor * 0.25;
+            
+            base_r += atmosphere * 50.0;
+            base_g += atmosphere * 100.0;
+            base_b += atmosphere * 200.0;
+            
+            // CAPA 5: Variación de iluminación mejorada (día/noche más pronunciado)
+            // La intensidad ya viene calculada desde el render
+            let enhanced_intensity = intensity * 0.4 + 0.6; // Mínimo 60%, máximo 100%
+            
+            let r = (base_r * enhanced_intensity).min(255.0);
+            let g = (base_g * enhanced_intensity).min(255.0);
+            let b = (base_b * enhanced_intensity).min(255.0);
+            
+            (r as u8, g as u8, b as u8)
+        },
+        
+        ShaderType::Venus => {
+            // ===== SHADER DE VENUS - PLANETA CON ATMÓSFERA DENSA Y 4 CAPAS =====
+            // Planeta amarillo/naranja con nubes densas y efecto invernadero
+            
+            let position = vertex_position;
+            
+            // Coordenadas esféricas para texturas procedurales
+            let phi = position.x.atan2(position.z) + time * 0.15; // Rotación rápida de atmósfera
+            let theta = (position.y / position.length()).acos();
+            
+            // CAPA 1: Color base - Atmósfera amarillo/naranja (ácido sulfúrico)
+            let base_noise1 = noise(phi * 3.0, theta * 3.0);
+            let base_noise2 = noise(phi * 6.0 + 50.0, theta * 6.0 + 50.0);
+            let base_combined = base_noise1 * 0.6 + base_noise2 * 0.4;
+            
+            let mut base_r;
+            let mut base_g;
+            let mut base_b;
+            
+            if base_combined < 0.35 {
+                // Áreas más oscuras - naranja oscuro
+                base_r = 200.0;
+                base_g = 140.0;
+                base_b = 50.0;
+            } else if base_combined < 0.7 {
+                // Áreas principales - amarillo cremoso
+                base_r = 230.0;
+                base_g = 190.0;
+                base_b = 80.0;
+            } else {
+                // Áreas brillantes - amarillo pálido
+                base_r = 250.0;
+                base_g = 220.0;
+                base_b = 120.0;
+            }
+            
+            // CAPA 2: Bandas atmosféricas horizontales (vientos super-rotación)
+            let band_pattern = (theta * 8.0 + phi * 2.0 + time * 0.3).sin();
+            let band_noise = noise(phi * 4.0 - time * 0.2, theta * 4.0);
+            let band_factor = (band_pattern * 0.5 + 0.5) * (band_noise * 0.5 + 0.5);
+            
+            // Aplicar bandas más oscuras
+            let band_darken = band_factor * 0.3;
+            base_r -= band_darken * 80.0;
+            base_g -= band_darken * 60.0;
+            base_b -= band_darken * 30.0;
+            
+            // CAPA 3: Patrones de nubes arremolinadas (ácido sulfúrico)
+            let cloud_noise1 = noise(phi * 5.0 + time * 0.4, theta * 5.0);
+            let cloud_noise2 = noise(phi * 10.0 - time * 0.3, theta * 10.0 + 100.0);
+            let cloud_combined = cloud_noise1 * 0.7 + cloud_noise2 * 0.3;
+            
+            let cloud_factor = if cloud_combined > 0.65 {
+                ((cloud_combined - 0.65) / 0.35).min(1.0) * 0.5
+            } else {
+                0.0
+            };
+            
+            if cloud_factor > 0.0 {
+                // Nubes más brillantes y amarillentas
+                base_r = base_r * (1.0 - cloud_factor) + 255.0 * cloud_factor;
+                base_g = base_g * (1.0 - cloud_factor) + 235.0 * cloud_factor;
+                base_b = base_b * (1.0 - cloud_factor) + 150.0 * cloud_factor;
+            }
+            
+            // CAPA 4: Atmósfera densa y brillante (efecto invernadero)
+            let edge_factor = 1.0 - normal.dot(Vec3::new(0.0, 0.0, 1.0)).abs();
+            let atmosphere = edge_factor * edge_factor * 0.4; // Muy brillante
+            
+            base_r += atmosphere * 150.0;
+            base_g += atmosphere * 120.0;
+            base_b += atmosphere * 50.0;
+            
+            // Variación de iluminación (Venus es muy reflectante)
+            let enhanced_intensity = intensity * 0.3 + 0.7; // Mínimo 70%, muy brillante
+            
+            let r = (base_r * enhanced_intensity).min(255.0);
+            let g = (base_g * enhanced_intensity).min(255.0);
+            let b = (base_b * enhanced_intensity).min(255.0);
+            
+            (r as u8, g as u8, b as u8)
+        },
+        
+        ShaderType::Mars => {
+            // ===== SHADER DE MARTE - PLANETA ROJO CON 4 CAPAS =====
+            // Planeta desértico rojizo/oxidado con variaciones de terreno
+            
+            let position = vertex_position;
+            
+            // Coordenadas esféricas para texturas procedurales
+            let phi = position.x.atan2(position.z) + time * 0.05; // Rotación lenta de textura
+            let theta = (position.y / position.length()).acos();
+            
+            // CAPA 1: Color base rojo/oxidado con variaciones de terreno
+            let terrain_noise1 = noise(phi * 4.0, theta * 4.0);
+            let terrain_noise2 = noise(phi * 8.0 + 100.0, theta * 8.0 + 100.0);
+            let terrain_combined = terrain_noise1 * 0.6 + terrain_noise2 * 0.4;
+            
+            let mut base_r;
+            let mut base_g;
+            let mut base_b;
+            
+            if terrain_combined < 0.3 {
+                // Regiones oscuras - roca volcánica/basalto
+                base_r = 80.0;
+                base_g = 40.0;
+                base_b = 30.0;
+            } else if terrain_combined < 0.7 {
+                // Regiones principales - óxido de hierro (rojo Marte clásico)
+                base_r = 193.0;
+                base_g = 68.0;
+                base_b = 14.0;
+            } else {
+                // Regiones claras - polvo/arena oxidada más clara
+                base_r = 210.0;
+                base_g = 105.0;
+                base_b = 30.0;
+            }
+            
+            // CAPA 2: Casquetes polares (hielo de CO2 y agua)
+            let polar_threshold = 0.85;
+            let polar_distance = theta.min(std::f32::consts::PI - theta) / std::f32::consts::PI;
+            
+            if polar_distance > polar_threshold {
+                let polar_factor = ((polar_distance - polar_threshold) / (1.0 - polar_threshold)).min(1.0);
+                let ice_white = 240.0;
+                let ice_cream = 230.0; // Tinte amarillento del hielo marciano
+                base_r = base_r * (1.0 - polar_factor) + ice_white * polar_factor;
+                base_g = base_g * (1.0 - polar_factor) + ice_cream * polar_factor;
+                base_b = base_b * (1.0 - polar_factor) + (ice_cream * 0.9) * polar_factor;
+            }
+            
+            // CAPA 3: Tormentas de polvo (áreas blanquecinas/amarillentas)
+            let dust_noise1 = noise(phi * 3.0 + time * 0.1, theta * 3.0);
+            let dust_noise2 = noise(phi * 6.0 - time * 0.05, theta * 6.0 + 200.0);
+            let dust_combined = dust_noise1 * 0.5 + dust_noise2 * 0.5;
+            
+            let dust_factor = if dust_combined > 0.75 {
+                ((dust_combined - 0.75) / 0.25).min(1.0) * 0.4 // Opacidad máxima 40%
+            } else {
+                0.0
+            };
+            
+            if dust_factor > 0.0 {
+                let dust_yellow_r = 220.0;
+                let dust_yellow_g = 180.0;
+                let dust_yellow_b = 120.0;
+                base_r = base_r * (1.0 - dust_factor) + dust_yellow_r * dust_factor;
+                base_g = base_g * (1.0 - dust_factor) + dust_yellow_g * dust_factor;
+                base_b = base_b * (1.0 - dust_factor) + dust_yellow_b * dust_factor;
+            }
+            
+            // CAPA 4: Atmósfera delgada (brillo rojizo tenue en los bordes)
+            let edge_factor = 1.0 - normal.dot(Vec3::new(0.0, 0.0, 1.0)).abs();
+            let atmosphere = edge_factor * edge_factor * 0.15; // Más sutil que la Tierra
+            
+            base_r += atmosphere * 100.0;
+            base_g += atmosphere * 30.0;
+            base_b += atmosphere * 10.0;
+            
+            // Variación de iluminación
+            let enhanced_intensity = intensity * 0.5 + 0.5; // Mínimo 50%, máximo 100%
+            
+            let r = (base_r * enhanced_intensity).min(255.0);
+            let g = (base_g * enhanced_intensity).min(255.0);
+            let b = (base_b * enhanced_intensity).min(255.0);
+            
+            (r as u8, g as u8, b as u8)
+        },
+        
+        ShaderType::Moon => {
+            // ===== SHADER DE LA LUNA - SATÉLITE ROCOSO CON 4 CAPAS =====
+            // Luna gris con cráteres, sin atmósfera
+            
+            let position = vertex_position;
+            
+            // Coordenadas esféricas para texturas procedurales
+            let phi = position.x.atan2(position.z);
+            let theta = (position.y / position.length()).acos();
+            
+            // CAPA 1: Color base gris con variaciones de terreno
+            let terrain_noise1 = noise(phi * 6.0, theta * 6.0);
+            let terrain_noise2 = noise(phi * 12.0 + 100.0, theta * 12.0 + 100.0);
+            let terrain_combined = terrain_noise1 * 0.6 + terrain_noise2 * 0.4;
+            
+            let mut base_r;
+            let mut base_g;
+            let mut base_b;
+            
+            if terrain_combined < 0.3 {
+                // Áreas oscuras - maria (mares lunares)
+                base_r = 80.0;
+                base_g = 80.0;
+                base_b = 85.0;
+            } else if terrain_combined < 0.7 {
+                // Regiones principales - regolito gris
+                base_r = 140.0;
+                base_g = 140.0;
+                base_b = 145.0;
+            } else {
+                // Regiones claras - tierras altas
+                base_r = 180.0;
+                base_g = 180.0;
+                base_b = 185.0;
+            }
+            
+            // CAPA 2: Cráteres (círculos oscuros con bordes)
+            let crater_noise1 = noise(phi * 15.0, theta * 15.0);
+            let crater_noise2 = noise(phi * 30.0 + 200.0, theta * 30.0 + 200.0);
+            
+            // Crear patrón de cráteres
+            if crater_noise1 > 0.75 {
+                let crater_depth = (crater_noise1 - 0.75) / 0.25;
+                let crater_darken = crater_depth * 0.4;
+                base_r -= crater_darken * 80.0;
+                base_g -= crater_darken * 80.0;
+                base_b -= crater_darken * 85.0;
+            }
+            
+            if crater_noise2 > 0.8 {
+                let crater_depth = (crater_noise2 - 0.8) / 0.2;
+                let crater_darken = crater_depth * 0.3;
+                base_r -= crater_darken * 60.0;
+                base_g -= crater_darken * 60.0;
+                base_b -= crater_darken * 65.0;
+            }
+            
+            // CAPA 3: Variaciones de brillo (rayos de impacto)
+            let ray_noise = noise(phi * 8.0 + theta * 8.0, theta * 4.0);
+            if ray_noise > 0.7 {
+                let ray_brightness = ((ray_noise - 0.7) / 0.3) * 0.2;
+                base_r += ray_brightness * 100.0;
+                base_g += ray_brightness * 100.0;
+                base_b += ray_brightness * 105.0;
+            }
+            
+            // CAPA 4: Sin atmósfera - contraste fuerte luz/sombra
+            // La luna no tiene atmósfera, así que el contraste es muy marcado
+            let harsh_intensity = if intensity > 0.5 {
+                intensity * 0.8 + 0.2 // Lado iluminado
+            } else {
+                intensity * 0.3 // Lado oscuro muy oscuro
+            };
+            
+            let r = (base_r * harsh_intensity).min(255.0);
+            let g = (base_g * harsh_intensity).min(255.0);
+            let b = (base_b * harsh_intensity).min(255.0);
+            
+            (r as u8, g as u8, b as u8)
+        },
+        
+        ShaderType::Jupiter => {
+            // ===== SHADER DE JÚPITER - GIGANTE GASEOSO CON BANDAS =====
+            // Planeta gigante con bandas horizontales y la Gran Mancha Roja
+            
+            let position = vertex_position;
+            
+            // Coordenadas esféricas para texturas procedurales
+            let phi = position.x.atan2(position.z) + time * 0.1; // Rotación rápida
+            let theta = (position.y / position.length()).acos();
+            
+            // Normalizar latitud a rango [0, 1]
+            let lat = theta / std::f32::consts::PI; // 0 = polo norte, 1 = polo sur
+            
+            // CAPA 1: Bandas horizontales base (colores naranja/beige/marrón)
+            // Crear patrón de bandas con diferentes anchos
+            let band_freq = 12.0; // Número de bandas
+            let band_pattern = (lat * band_freq).sin();
+            let band_noise = noise(phi * 2.0, lat * 15.0 + time * 0.05);
+            
+            let mut base_r;
+            let mut base_g;
+            let mut base_b;
+            
+            // Alternar entre bandas claras y oscuras
+            if (band_pattern + band_noise * 0.3) > 0.0 {
+                // Zonas ecuatoriales claras (beige/crema)
+                base_r = 220.0 + band_noise * 20.0;
+                base_g = 190.0 + band_noise * 20.0;
+                base_b = 140.0 + band_noise * 15.0;
+            } else {
+                // Bandas oscuras (marrón/naranja)
+                base_r = 180.0 + band_noise * 15.0;
+                base_g = 130.0 + band_noise * 15.0;
+                base_b = 80.0 + band_noise * 10.0;
+            }
+            
+            // CAPA 2: Turbulencia en las bandas (remolinos)
+            let turb_noise1 = noise(phi * 8.0 + time * 0.2, lat * 20.0);
+            let turb_noise2 = noise(phi * 15.0 - time * 0.15, lat * 30.0 + 100.0);
+            let turbulence = turb_noise1 * 0.6 + turb_noise2 * 0.4;
+            
+            // Agregar variación de turbulencia
+            base_r += turbulence * 30.0 - 15.0;
+            base_g += turbulence * 25.0 - 12.0;
+            base_b += turbulence * 20.0 - 10.0;
+            
+            // CAPA 3: Gran Mancha Roja (óvalo rojizo en latitud media)
+            let spot_lat_center = 0.6; // Latitud de la mancha (hemisferio sur)
+            let spot_lon_center = std::f32::consts::PI * 0.5 + time * 0.02; // Rota lentamente
+            
+            // Calcular distancia a la mancha
+            let lat_diff = (lat - spot_lat_center).abs();
+            let lon_diff = (phi - spot_lon_center).abs().min(std::f32::consts::TAU - (phi - spot_lon_center).abs());
+            
+            // Mancha elíptica (más ancha que alta)
+            let spot_distance = (lat_diff * lat_diff * 400.0 + lon_diff * lon_diff * 100.0).sqrt();
+            
+            if spot_distance < 1.5 {
+                let spot_factor = (1.0 - spot_distance / 1.5).max(0.0);
+                let spot_noise = noise(phi * 10.0 + time * 0.1, lat * 10.0);
+                
+                // Color rojizo/marrón de la mancha
+                base_r = base_r * (1.0 - spot_factor * 0.8) + (200.0 + spot_noise * 20.0) * spot_factor * 0.8;
+                base_g = base_g * (1.0 - spot_factor * 0.8) + (100.0 + spot_noise * 10.0) * spot_factor * 0.8;
+                base_b = base_b * (1.0 - spot_factor * 0.8) + (80.0 + spot_noise * 10.0) * spot_factor * 0.8;
+            }
+            
+            // CAPA 4: Zonas polares (más claras y azuladas)
+            let polar_factor = if lat < 0.15 || lat > 0.85 {
+                let dist = lat.min(1.0 - lat);
+                (0.15 - dist) / 0.15
+            } else {
+                0.0
+            };
+            
+            if polar_factor > 0.0 {
+                base_r += polar_factor * 30.0;
+                base_g += polar_factor * 40.0;
+                base_b += polar_factor * 60.0;
+            }
+            
+            // CAPA 5: Atmósfera brillante en los bordes
+            let edge_factor = 1.0 - normal.dot(Vec3::new(0.0, 0.0, 1.0)).abs();
+            let atmosphere = edge_factor * edge_factor * 0.2;
+            
+            base_r += atmosphere * 80.0;
+            base_g += atmosphere * 70.0;
+            base_b += atmosphere * 50.0;
+            
+            // Variación de iluminación
+            let enhanced_intensity = intensity * 0.4 + 0.6; // Mínimo 60%, máximo 100%
+            
+            let r = (base_r * enhanced_intensity).min(255.0);
+            let g = (base_g * enhanced_intensity).min(255.0);
+            let b = (base_b * enhanced_intensity).min(255.0);
+            
+            (r as u8, g as u8, b as u8)
+        },
+        
+        ShaderType::Uranus => {
+            // ===== SHADER DE URANO - GIGANTE DE HIELO AZUL-VERDE =====
+            // Planeta con atmósfera uniforme de metano (azul-verde claro)
+            
+            let position = vertex_position;
+            
+            // Coordenadas esféricas para texturas procedurales
+            let phi = position.x.atan2(position.z) + time * 0.08; // Rotación media
+            let theta = (position.y / position.length()).acos();
+            
+            // CAPA 1: Color base azul-verde (metano)
+            let base_noise = noise(phi * 3.0, theta * 3.0 + time * 0.05);
+            
+            let mut base_r = 140.0 + base_noise * 30.0;  // Cyan/verde-azulado
+            let mut base_g = 220.0 + base_noise * 20.0;  // Verde-azul claro
+            let mut base_b = 220.0 + base_noise * 25.0;  // Azul claro
+            
+            // CAPA 2: Bandas sutiles (muy poco visibles en Urano)
+            let lat = theta / std::f32::consts::PI;
+            let band_pattern = (lat * 6.0).sin();
+            let band_noise = noise(phi * 2.0, lat * 10.0);
+            
+            let band_factor = (band_pattern * 0.5 + 0.5) * (band_noise * 0.5 + 0.5) * 0.15;
+            base_r -= band_factor * 20.0;
+            base_g -= band_factor * 15.0;
+            base_b -= band_factor * 15.0;
+            
+            // CAPA 3: Atmósfera uniforme y suave
+            let atmosphere_noise = noise(phi * 5.0 + time * 0.1, theta * 5.0);
+            base_r += atmosphere_noise * 15.0 - 7.0;
+            base_g += atmosphere_noise * 15.0 - 7.0;
+            base_b += atmosphere_noise * 15.0 - 7.0;
+            
+            // CAPA 4: Brillo atmosférico en los bordes
+            let edge_factor = 1.0 - normal.dot(Vec3::new(0.0, 0.0, 1.0)).abs();
+            let atmosphere = edge_factor * edge_factor * 0.3;
+            
+            base_r += atmosphere * 60.0;
+            base_g += atmosphere * 80.0;
+            base_b += atmosphere * 80.0;
+            
+            // Variación de iluminación
+            let enhanced_intensity = intensity * 0.3 + 0.7; // Mínimo 70% (muy reflectante)
+            
+            let r = (base_r * enhanced_intensity).min(255.0);
+            let g = (base_g * enhanced_intensity).min(255.0);
+            let b = (base_b * enhanced_intensity).min(255.0);
+            
+            (r as u8, g as u8, b as u8)
+        },
+        
+        ShaderType::Neptune => {
+            // ===== SHADER DE NEPTUNO - GIGANTE DE HIELO AZUL OSCURO =====
+            // Planeta con atmósfera de metano (azul intenso) y Gran Mancha Oscura
+            
+            let position = vertex_position;
+            
+            // Coordenadas esféricas para texturas procedurales
+            let phi = position.x.atan2(position.z) + time * 0.12; // Rotación rápida
+            let theta = (position.y / position.length()).acos();
+            
+            // CAPA 1: Color base azul profundo (metano)
+            let base_noise = noise(phi * 4.0, theta * 4.0 + time * 0.06);
+            
+            let mut base_r = 40.0 + base_noise * 25.0;   // Azul muy oscuro
+            let mut base_g = 90.0 + base_noise * 30.0;   // Azul medio
+            let mut base_b = 200.0 + base_noise * 35.0;  // Azul intenso
+            
+            // CAPA 2: Bandas sutiles horizontales
+            let lat = theta / std::f32::consts::PI;
+            let band_pattern = (lat * 8.0 + time * 0.1).sin();
+            let band_noise = noise(phi * 3.0, lat * 12.0);
+            
+            let band_factor = (band_pattern * 0.5 + 0.5) * (band_noise * 0.5 + 0.5) * 0.2;
+            base_r += band_factor * 30.0 - 15.0;
+            base_g += band_factor * 25.0 - 12.0;
+            base_b += band_factor * 20.0 - 10.0;
+            
+            // CAPA 3: Gran Mancha Oscura (óvalo oscuro en latitud media)
+            let spot_lat_center = 0.4; // Hemisferio sur
+            let spot_lon_center = std::f32::consts::PI * 0.7 + time * 0.03;
+            
+            let lat_diff = (lat - spot_lat_center).abs();
+            let lon_diff = (phi - spot_lon_center).abs().min(std::f32::consts::TAU - (phi - spot_lon_center).abs());
+            
+            let spot_distance = (lat_diff * lat_diff * 300.0 + lon_diff * lon_diff * 80.0).sqrt();
+            
+            if spot_distance < 1.2 {
+                let spot_factor = (1.0 - spot_distance / 1.2).max(0.0) * 0.6;
+                base_r *= 1.0 - spot_factor * 0.5;
+                base_g *= 1.0 - spot_factor * 0.4;
+                base_b *= 1.0 - spot_factor * 0.3;
+            }
+            
+            // CAPA 4: Nubes cirros brillantes (raras)
+            let cloud_noise = noise(phi * 10.0 + time * 0.2, theta * 10.0);
+            if cloud_noise > 0.8 {
+                let cloud_factor = (cloud_noise - 0.8) / 0.2 * 0.3;
+                base_r += cloud_factor * 80.0;
+                base_g += cloud_factor * 100.0;
+                base_b += cloud_factor * 120.0;
+            }
+            
+            // CAPA 5: Brillo atmosférico en los bordes
+            let edge_factor = 1.0 - normal.dot(Vec3::new(0.0, 0.0, 1.0)).abs();
+            let atmosphere = edge_factor * edge_factor * 0.25;
+            
+            base_r += atmosphere * 40.0;
+            base_g += atmosphere * 70.0;
+            base_b += atmosphere * 100.0;
+            
+            // Variación de iluminación
+            let enhanced_intensity = intensity * 0.3 + 0.7; // Mínimo 70% (muy reflectante)
+            
+            let r = (base_r * enhanced_intensity).min(255.0);
+            let g = (base_g * enhanced_intensity).min(255.0);
+            let b = (base_b * enhanced_intensity).min(255.0);
+            
+            (r as u8, g as u8, b as u8)
+        },
+        
+        ShaderType::Spaceship => {
+            // ===== SHADER ORIGINAL DE LA NAVE (COMENTADO PERO FUNCIONAL) =====
+            // Este código está mantenido para referencia pero no se usa por defecto
+            // Para activarlo, cambiar el shader_type en la carga del modelo
+            
+            // Por ahora retornamos un color gris básico
+            let r = (150.0 * (0.7 + 0.3 * intensity)).min(255.0);
+            let g = (150.0 * (0.7 + 0.3 * intensity)).min(255.0);
+            let b = (150.0 * (0.7 + 0.3 * intensity)).min(255.0);
+            
+            (r as u8, g as u8, b as u8)
+        }
+    }
+}
+
 // Estructura para almacenar un triángulo con información 3D completa
+#[allow(dead_code)]
 struct Triangle3D {
     v0: glam::Vec4,
     v1: glam::Vec4,
@@ -151,26 +866,29 @@ fn fill_triangle_zbuffer(
 }
 
 /// Renderiza un modelo 3D en el canvas.
-/// Dibuja el modelo con triángulos rellenos y sombreado simple.
+/// Dibuja el modelo con triángulos rellenos y sombreado mediante shaders.
 fn render(
     canvas: &mut sdl2::render::Canvas<sdl2::video::Window>, 
     zbuffer: &mut ZBuffer, 
     model: &tobj::Model, 
-    camera_distance: f32, 
+    camera_position: Vec3,  // Posición libre de la cámara
+    camera_target: Vec3,    // Objetivo de la cámara
     model_translation: glam::Vec3, 
     model_scale: f32, 
     rotation_y: f32, 
-    mesh_index: usize
+    shader_type: ShaderType, // Tipo de shader a aplicar
+    time: f32,               // Tiempo para animaciones
 ) {
     let positions = &model.mesh.positions;
     let indices = &model.mesh.indices;
 
     // Matrices de transformación para pasar de coordenadas 3D a 2D
-    let projection = Mat4::perspective_rh_gl(std::f32::consts::FRAC_PI_4, SCREEN_WIDTH as f32 / SCREEN_HEIGHT as f32, 0.1, 100.0);
+    // Ajustar near y far plane para manejar las enormes distancias del sistema solar
+    let projection = Mat4::perspective_rh_gl(std::f32::consts::FRAC_PI_4, SCREEN_WIDTH as f32 / SCREEN_HEIGHT as f32, 1.0, 50000.0);
     let view = Mat4::look_at_rh(
-        Vec3::new(0.0, 0.0, camera_distance), // Posición de la cámara (ajustable)
-        Vec3::ZERO,      // Hacia dónde mira la cámara
-        Vec3::Y,         // Vector "arriba"
+        camera_position,  // Posición de la cámara (ahora controlable)
+        camera_target,    // Hacia dónde mira la cámara
+        Vec3::Y,          // Vector "arriba"
     );
     
     // Matriz del modelo: primero rotar en Y, luego trasladar para centrar y escalar
@@ -221,73 +939,17 @@ fn render(
         // Calcular intensidad de luz (producto punto entre normal y dirección de luz)
         let intensity = normal.dot(light_dir).max(0.0);
         
-        // Esquema de colores metálico - Estilo Military/Tactical
-        let (base_r, base_g, base_b) = match mesh_index {
-            // Mesh 0: Alas - Gris oscuro metálico (NO TOCAR)
-            0 => (70, 75, 80),
-            
-            // Mesh 2: CUERPO PRINCIPAL - VERDE OLIVA CON VARIACIONES
-            2 => {
-                // USAR COORDENADAS ORIGINALES
-                let avg_y = (v0.y + v1.y + v2.y) / 3.0;
-                let avg_x = (v0.x + v1.x + v2.x) / 3.0;
-                let avg_z = (v0.z + v1.z + v2.z) / 3.0;
-                
-                // Cockpit/vidrio - parte superior central frontal - VERDE OLIVA MÁS CLARO
-                if avg_y > 0.1 && avg_x > -2.0 {
-                    (160, 180, 120)  // Verde oliva claro - COCKPIT
-                }
-                // Parte frontal - Verde oliva claro
-                else if avg_x > -3.0 {
-                    (140, 160, 100)  // Verde oliva claro
-                }
-                // Parte trasera - Verde oscuro
-                else if avg_x < -5.5 {
-                    (90, 110, 70)    // Verde oscuro
-                }
-                // Laterales del cuerpo - Verde militar medio
-                else if avg_z < -4.0 {
-                    (115, 135, 90)   // Verde militar medio
-                }
-                // Centro del cuerpo - Verde oliva base
-                else {
-                    (105, 125, 85)   // Verde oliva base
-                }
-            },
-            
-            // Mesh 3: Protuberancias y detalles - MARRÓN Y GRIS VERDOSO
-            3 => {
-                // USAR COORDENADAS ORIGINALES
-                let avg_x = (v0.x + v1.x + v2.x) / 3.0;
-                let avg_z = (v0.z + v1.z + v2.z) / 3.0;
-                let avg_y = (v0.y + v1.y + v2.y) / 3.0;
-                
-                // Protuberancias superiores - Gris claro
-                if avg_y > 2.5 {
-                    (150, 155, 135)  // Gris claro verdoso
-                }
-                // Protuberancias traseras profundas - Marrón militar
-                else if avg_z < -5.0 {
-                    (130, 110, 75)   // Marrón militar/arena
-                }
-                // Protuberancias laterales externas - Gris verdoso
-                else if avg_x.abs() > 4.0 {
-                    (125, 130, 105)  // Gris verdoso
-                }
-                // Detalles centrales - Verde oscuro
-                else {
-                    (80, 100, 65)    // Verde oscuro
-                }
-            },
-            
-            // Mesh 1 u otros: Gris por defecto
-            _ => (150, 150, 150),
-        };
+        // Calcular centro del triángulo para pasar al shader
+        let avg_position = (v0 + v1 + v2) / 3.0;
         
-        // Aplicar intensidad de luz al color - MÁS LUZ AMBIENTAL (70% base + 30% direccional)
-        let r = (base_r as f32 * (0.7 + 0.3 * intensity)).min(255.0) as u8;
-        let g = (base_g as f32 * (0.7 + 0.3 * intensity)).min(255.0) as u8;
-        let b = (base_b as f32 * (0.7 + 0.3 * intensity)).min(255.0) as u8;
+        // Aplicar el shader correspondiente
+        let (r, g, b) = apply_shader(
+            shader_type,
+            avg_position,
+            normal,
+            intensity,
+            time
+        );
         
         // Dibujar el triángulo directamente con z-buffer
         let z0 = p0.w;
@@ -310,7 +972,7 @@ fn main() -> Result<(), String> {
     let video_subsystem = sdl_context.video()?;
 
     // Crea la ventana
-    let window = video_subsystem.window("Renderizador de OBJ en Rust", SCREEN_WIDTH, SCREEN_HEIGHT)
+    let window = video_subsystem.window("Sistema Solar - Lab de Shaders", SCREEN_WIDTH, SCREEN_HEIGHT)
         .position_centered()
         .build()
         .map_err(|e| e.to_string())?;
@@ -318,13 +980,11 @@ fn main() -> Result<(), String> {
     // Crea un canvas para dibujar
     let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
 
-    // Carga el archivo OBJ desde la carpeta Spaceship
-    // Leemos el contenido y removemos las líneas de materiales para evitar errores de parseo
-    let obj_content = fs::read_to_string("Spaceship/Spaceship.obj")
-        .expect("No se pudo leer el archivo OBJ");
+    // ===== CARGA DEL SOL (sphere.obj) =====
+    let sun_content = fs::read_to_string("sphere.obj")
+        .expect("No se pudo leer sphere.obj");
     
-    // Filtramos las líneas que contienen mtllib y usemtl para ignorar materiales
-    let filtered_content: String = obj_content
+    let filtered_sun: String = sun_content
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
@@ -333,7 +993,7 @@ fn main() -> Result<(), String> {
         .collect::<Vec<&str>>()
         .join("\n");
     
-    let mut obj_reader = Cursor::new(filtered_content.as_bytes());
+    let mut sun_reader = Cursor::new(filtered_sun.as_bytes());
     
     let load_options = tobj::LoadOptions {
         triangulate: true,
@@ -342,46 +1002,161 @@ fn main() -> Result<(), String> {
         ..Default::default()
     };
     
-    // Cargamos el OBJ sin referencias a materiales
     let result = tobj::load_obj_buf(
-        &mut obj_reader,
+        &mut sun_reader,
         &load_options,
         |_p| Ok((Vec::new(), Default::default()))
     );
     
-    let (models, _materials) = result.expect("Fallo al cargar el archivo OBJ");
+    let (sun_models, _) = result.expect("Fallo al cargar sphere.obj");
+    println!("Sol cargado con {} mallas", sun_models.len());
 
-    println!("Modelo cargado con {} mallas", models.len());
+    // ===== CARGA DEL PLANETA ROCOSO (sphere.obj reutilizado) =====
+    let rocky_content = fs::read_to_string("sphere.obj")
+        .expect("No se pudo leer sphere.obj para el planeta rocoso");
+    
+    let filtered_rocky: String = rocky_content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with("mtllib") && !trimmed.starts_with("usemtl")
+        })
+        .collect::<Vec<&str>>()
+        .join("\n");
+    
+    let mut rocky_reader = Cursor::new(filtered_rocky.as_bytes());
+    
+    let result = tobj::load_obj_buf(
+        &mut rocky_reader,
+        &load_options,
+        |_p| Ok((Vec::new(), Default::default()))
+    );
+    
+    let (rocky_models, _) = result.expect("Fallo al cargar sphere.obj para planeta rocoso");
+    println!("Planeta rocoso cargado con {} mallas", rocky_models.len());
 
-    // Calcular centro y escala del modelo para centrarlo y ajustarlo a la pantalla
+    // ===== CARGA DE LA NAVE (COMENTADO PERO FUNCIONAL) =====
+    // Descomenta esta sección si quieres ver la nave junto al sol
+    /*
+    let spaceship_content = fs::read_to_string("Spaceship/Spaceship.obj")
+        .expect("No se pudo leer Spaceship.obj");
+    
+    let filtered_spaceship: String = spaceship_content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with("mtllib") && !trimmed.starts_with("usemtl")
+        })
+        .collect::<Vec<&str>>()
+        .join("\n");
+    
+    let mut spaceship_reader = Cursor::new(filtered_spaceship.as_bytes());
+    
+    let result = tobj::load_obj_buf(
+        &mut spaceship_reader,
+        &load_options,
+        |_p| Ok((Vec::new(), Default::default()))
+    );
+    
+    let (spaceship_models, _) = result.expect("Fallo al cargar Spaceship.obj");
+    println!("Nave cargada con {} mallas", spaceship_models.len());
+    */
+
+    // Calcular centro y escala del SOL
     let mut sum = Vec3::ZERO;
     let mut vcount: usize = 0;
-    for model in &models {
+    for model in &sun_models {
         let pos = &model.mesh.positions;
         for i in (0..pos.len()).step_by(3) {
             sum += Vec3::new(pos[i], pos[i + 1], pos[i + 2]);
             vcount += 1;
         }
     }
-    let centroid = if vcount > 0 { sum / vcount as f32 } else { Vec3::ZERO };
+    let sun_centroid = if vcount > 0 { sum / vcount as f32 } else { Vec3::ZERO };
 
     let mut max_r = 0.0f32;
-    for model in &models {
+    for model in &sun_models {
         let pos = &model.mesh.positions;
         for i in (0..pos.len()).step_by(3) {
             let v = Vec3::new(pos[i], pos[i + 1], pos[i + 2]);
-            let d = (v - centroid).length();
+            let d = (v - sun_centroid).length();
             if d > max_r { max_r = d; }
         }
     }
-    let model_scale = if max_r > 0.0 { 1.5 / max_r } else { 1.0 };
-    let model_translation = -centroid;
+    let sun_scale = if max_r > 0.0 { 8.0 / max_r } else { 1.0 }; // Sol el doble de grande (8.0)
+    let sun_translation = -sun_centroid;
+
+    // Configuración del planeta rocoso (Tierra) - MISMO TAMAÑO QUE ANTES
+    let rocky_scale = if max_r > 0.0 { 2.0 / max_r } else { 1.0 }; // Mitad del tamaño del sol
 
     let mut event_pump = sdl_context.event_pump()?;
     
-    // Distancia inicial de la cámara y ángulo de rotación manual
-    let mut camera_distance = 10.0;
-    let mut rotation_y = 0.0_f32;
+    // ===== SISTEMA DE CÁMARA LIBRE =====
+    // Cámara cerca del sol para empezar la exploración
+    let mut camera_position = Vec3::new(0.0, 5.0, 15.0); // Cerca del sol
+    let mut camera_yaw = 0.0f32; // Mirando hacia adelante
+    let mut camera_pitch = 0.0f32; // Horizonte
+    
+    // ===== ROTACIÓN DEL SOL =====
+    let mut sun_rotation = 0.0_f32;
+    
+    // ===== ROTACIÓN Y TRASLACIÓN DEL PLANETA ROCOSO (TIERRA) =====
+    let mut rocky_rotation = 0.0_f32;      // Rotación sobre su eje
+    let mut rocky_orbit_angle = 0.0_f32;   // Ángulo orbital alrededor del sol
+    let rocky_orbit_radius = 8000.0_f32;   // Radio de la órbita (8000 unidades del sol - antes 5000 + 3000)
+    let rocky_orbit_speed = 0.0006_f32;    // Velocidad orbital ajustada para 8000
+    let rocky_rotation_speed = 0.01_f32;   // Velocidad de rotación sobre su eje (más visible)
+    
+    // ===== ROTACIÓN Y TRASLACIÓN DE VENUS =====
+    let mut venus_rotation = 0.0_f32;      // Rotación sobre su eje (muy lenta y retrógrada)
+    let mut venus_orbit_angle = std::f32::consts::PI * 0.5; // Posición inicial diferente
+    let venus_orbit_radius = 6000.0_f32;   // Más cerca que la Tierra (antes 3000 + 3000)
+    let venus_orbit_speed = 0.0008_f32;    // Más rápido que la Tierra (más cerca del sol)
+    let venus_rotation_speed = -0.002_f32; // Rotación retrógrada (negativa) y muy lenta
+    let venus_scale = if max_r > 0.0 { 1.9 / max_r } else { 1.0 }; // Casi del tamaño de la Tierra
+    
+    // ===== ROTACIÓN Y TRASLACIÓN DE MARTE =====
+    let mut mars_rotation = 0.0_f32;       // Rotación sobre su eje
+    let mut mars_orbit_angle = std::f32::consts::PI; // Empezar en lado opuesto
+    let mars_orbit_radius = 10000.0_f32;   // Más lejos que la Tierra (antes 7000 + 3000)
+    let mars_orbit_speed = 0.0004_f32;     // Más lento que la Tierra (más lejos del sol)
+    let mars_rotation_speed = 0.0098_f32;  // Rotación similar a la Tierra
+    let mars_scale = if max_r > 0.0 { 1.5 / max_r } else { 1.0 }; // Más pequeño que la Tierra
+    
+    // ===== ROTACIÓN Y TRASLACIÓN DE JÚPITER (GIGANTE GASEOSO) =====
+    let mut jupiter_rotation = 0.0_f32;    // Rotación sobre su eje (muy rápida)
+    let mut jupiter_orbit_angle = std::f32::consts::PI * 1.5; // Posición inicial
+    let jupiter_orbit_radius = 13000.0_f32; // 3000 unidades más lejos que Marte
+    let jupiter_orbit_speed = 0.0002_f32;  // Muy lento (más lejos del sol)
+    let jupiter_rotation_speed = 0.02_f32; // Rotación rápida (Júpiter rota en ~10 horas)
+    let jupiter_scale = if max_r > 0.0 { 4.0 / max_r } else { 1.0 }; // Mitad del tamaño del Sol (Sol es 8.0)
+    
+    // ===== ROTACIÓN Y TRASLACIÓN DE URANO (GIGANTE DE HIELO) =====
+    let mut uranus_rotation = 0.0_f32;     // Rotación sobre su eje
+    let mut uranus_orbit_angle = std::f32::consts::PI * 0.3; // Posición inicial
+    let uranus_orbit_radius = 14000.0_f32; // 1000 unidades más lejos que Júpiter
+    let uranus_orbit_speed = 0.00015_f32;  // Muy lento
+    let uranus_rotation_speed = 0.015_f32; // Rotación media
+    let uranus_scale = if max_r > 0.0 { 3.0 / max_r } else { 1.0 }; // Más pequeño que Júpiter
+    
+    // ===== ROTACIÓN Y TRASLACIÓN DE NEPTUNO (GIGANTE DE HIELO) =====
+    let mut neptune_rotation = 0.0_f32;    // Rotación sobre su eje
+    let mut neptune_orbit_angle = std::f32::consts::PI * 0.8; // Posición inicial
+    let neptune_orbit_radius = 15000.0_f32; // 1000 unidades más lejos que Urano
+    let neptune_orbit_speed = 0.0001_f32;  // Muy muy lento (más lejano)
+    let neptune_rotation_speed = 0.016_f32; // Rotación media-rápida
+    let neptune_scale = if max_r > 0.0 { 2.8 / max_r } else { 1.0 }; // Similar a Urano
+    
+    // ===== ROTACIÓN Y TRASLACIÓN DE LA LUNA (SATÉLITE DE LA TIERRA) =====
+    let mut moon_rotation = 0.0_f32;       // Rotación sobre su eje (acoplamiento de marea)
+    let mut moon_orbit_angle = 0.0_f32;    // Ángulo orbital alrededor de la Tierra
+    let moon_orbit_radius = 200.0_f32;     // 200.0 unidades de la Tierra (mucho más visible)
+    let moon_orbit_speed = 0.05_f32;       // Velocidad orbital (completa órbita en ~2 minutos)
+    let moon_rotation_speed = 0.05_f32;    // Misma que orbital (acoplamiento de marea - siempre muestra misma cara)
+    let moon_scale = if max_r > 0.0 { 0.7 / max_r } else { 1.0 }; // Tamaño apropiado (0.7 - más pequeña que Tierra)
+    
+    // ===== TIEMPO PARA ANIMACIONES =====
+    let mut time = 0.0f32;
 
     'running: loop {
         // Manejo de eventos (como cerrar la ventana)
@@ -391,41 +1166,332 @@ fn main() -> Result<(), String> {
                 Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
                     break 'running
                 },
-                Event::KeyDown { keycode: Some(Keycode::W), .. } | 
-                Event::KeyDown { keycode: Some(Keycode::Up), .. } => {
-                    // Acercarse (W o flecha arriba)
-                    camera_distance = (camera_distance - 0.5_f32).max(3.0);
+                // ===== MOVIMIENTO DE CÁMARA LIBRE =====
+                Event::KeyDown { keycode: Some(Keycode::W), .. } => {
+                    // Adelante (movimiento libre en dirección de la cámara)
+                    let forward = Vec3::new(
+                        camera_yaw.sin() * camera_pitch.cos(),
+                        camera_pitch.sin(),
+                        camera_yaw.cos() * camera_pitch.cos()
+                    );
+                    camera_position += forward * 5.0; // Reducido de 50.0 a 5.0
                 },
-                Event::KeyDown { keycode: Some(Keycode::S), .. } | 
-                Event::KeyDown { keycode: Some(Keycode::Down), .. } => {
-                    // Alejarse (S o flecha abajo)
-                    camera_distance = (camera_distance + 0.5_f32).min(30.0);
+                Event::KeyDown { keycode: Some(Keycode::S), .. } => {
+                    // Atrás
+                    let forward = Vec3::new(
+                        camera_yaw.sin() * camera_pitch.cos(),
+                        camera_pitch.sin(),
+                        camera_yaw.cos() * camera_pitch.cos()
+                    );
+                    camera_position -= forward * 5.0; // Reducido de 50.0 a 5.0
                 },
-                Event::KeyDown { keycode: Some(Keycode::A), .. } | 
+                Event::KeyDown { keycode: Some(Keycode::A), .. } => {
+                    // Izquierda (strafe)
+                    let right = Vec3::new(
+                        camera_yaw.cos(),
+                        0.0,
+                        -camera_yaw.sin()
+                    );
+                    camera_position -= right * 5.0; // Reducido de 50.0 a 5.0
+                },
+                Event::KeyDown { keycode: Some(Keycode::D), .. } => {
+                    // Derecha (strafe)
+                    let right = Vec3::new(
+                        camera_yaw.cos(),
+                        0.0,
+                        -camera_yaw.sin()
+                    );
+                    camera_position += right * 5.0; // Reducido de 50.0 a 5.0
+                },
+                Event::KeyDown { keycode: Some(Keycode::Space), .. } => {
+                    // Arriba
+                    camera_position.y += 2.5; // Reducido de 25.0 a 2.5
+                },
+                Event::KeyDown { keycode: Some(Keycode::LShift), .. } => {
+                    // Abajo
+                    camera_position.y -= 2.5; // Reducido de 25.0 a 2.5
+                },
                 Event::KeyDown { keycode: Some(Keycode::Left), .. } => {
-                    // Rotar a la izquierda (A o flecha izquierda)
-                    rotation_y -= 0.1;
+                    // Rotar cámara a la izquierda
+                    camera_yaw -= 0.02; // Reducido de 0.1 a 0.02
                 },
-                Event::KeyDown { keycode: Some(Keycode::D), .. } | 
                 Event::KeyDown { keycode: Some(Keycode::Right), .. } => {
-                    // Rotar a la derecha (D o flecha derecha)
-                    rotation_y += 0.1;
+                    // Rotar cámara a la derecha
+                    camera_yaw += 0.02; // Reducido de 0.1 a 0.02
+                },
+                Event::KeyDown { keycode: Some(Keycode::Up), .. } => {
+                    // Rotar cámara arriba
+                    camera_pitch = (camera_pitch + 0.02).min(std::f32::consts::FRAC_PI_2 - 0.1); // Reducido de 0.1 a 0.02
+                },
+                Event::KeyDown { keycode: Some(Keycode::Down), .. } => {
+                    // Rotar cámara abajo
+                    camera_pitch = (camera_pitch - 0.02).max(-std::f32::consts::FRAC_PI_2 + 0.1); // Reducido de 0.1 a 0.02
                 },
                 _ => {}
             }
         }
 
-        // Limpia la pantalla con color negro
+        // Actualizar tiempo para animaciones
+        time += 0.016; // ~60 FPS
+        
+        // Rotación automática del sol
+        sun_rotation += 0.005;
+        
+        // Actualizar rotación del planeta rocoso (Tierra)
+        rocky_rotation += rocky_rotation_speed;
+        
+        // Actualizar órbita del planeta rocoso
+        rocky_orbit_angle += rocky_orbit_speed;
+        
+        // Calcular posición orbital del planeta rocoso (Tierra) centrada en el origen (sol)
+        let rocky_position = Vec3::new(
+            rocky_orbit_radius * rocky_orbit_angle.cos(),
+            0.0,
+            rocky_orbit_radius * rocky_orbit_angle.sin()
+        );
+        
+        // Actualizar rotación de Venus (retrógrada)
+        venus_rotation += venus_rotation_speed;
+        
+        // Actualizar órbita de Venus
+        venus_orbit_angle += venus_orbit_speed;
+        
+        // Calcular posición orbital de Venus
+        let venus_position = Vec3::new(
+            venus_orbit_radius * venus_orbit_angle.cos(),
+            0.0,
+            venus_orbit_radius * venus_orbit_angle.sin()
+        );
+        
+        // Actualizar rotación de Marte
+        mars_rotation += mars_rotation_speed;
+        
+        // Actualizar órbita de Marte
+        mars_orbit_angle += mars_orbit_speed;
+        
+        // Calcular posición orbital de Marte
+        let mars_position = Vec3::new(
+            mars_orbit_radius * mars_orbit_angle.cos(),
+            0.0,
+            mars_orbit_radius * mars_orbit_angle.sin()
+        );
+        
+        // Actualizar rotación de Júpiter (muy rápida)
+        jupiter_rotation += jupiter_rotation_speed;
+        
+        // Actualizar órbita de Júpiter
+        jupiter_orbit_angle += jupiter_orbit_speed;
+        
+        // Calcular posición orbital de Júpiter
+        let jupiter_position = Vec3::new(
+            jupiter_orbit_radius * jupiter_orbit_angle.cos(),
+            0.0,
+            jupiter_orbit_radius * jupiter_orbit_angle.sin()
+        );
+        
+        // Actualizar rotación de Urano
+        uranus_rotation += uranus_rotation_speed;
+        
+        // Actualizar órbita de Urano
+        uranus_orbit_angle += uranus_orbit_speed;
+        
+        // Calcular posición orbital de Urano
+        let uranus_position = Vec3::new(
+            uranus_orbit_radius * uranus_orbit_angle.cos(),
+            0.0,
+            uranus_orbit_radius * uranus_orbit_angle.sin()
+        );
+        
+        // Actualizar rotación de Neptuno
+        neptune_rotation += neptune_rotation_speed;
+        
+        // Actualizar órbita de Neptuno
+        neptune_orbit_angle += neptune_orbit_speed;
+        
+        // Calcular posición orbital de Neptuno
+        let neptune_position = Vec3::new(
+            neptune_orbit_radius * neptune_orbit_angle.cos(),
+            0.0,
+            neptune_orbit_radius * neptune_orbit_angle.sin()
+        );
+        
+        // Actualizar rotación de la Luna (acoplamiento de marea)
+        moon_rotation += moon_rotation_speed;
+        
+        // Actualizar órbita de la Luna alrededor de la Tierra
+        moon_orbit_angle += moon_orbit_speed;
+        
+        // Calcular posición de la Luna RELATIVA A LA TIERRA (órbita circular)
+        let moon_relative_position = Vec3::new(
+            moon_orbit_radius * moon_orbit_angle.cos(),
+            0.0,
+            moon_orbit_radius * moon_orbit_angle.sin()
+        );
+
+        // Calcular el objetivo de la cámara basado en yaw y pitch
+        let camera_target = camera_position + Vec3::new(
+            camera_yaw.sin() * camera_pitch.cos(),
+            camera_pitch.sin(),
+            camera_yaw.cos() * camera_pitch.cos()
+        );
+
+        // Limpia la pantalla con color negro (espacio)
         canvas.set_draw_color(Color::RGB(0, 0, 0));
         canvas.clear();
         
-        // Crear un z-buffer compartido para todas las mallas
+        // Crear un z-buffer compartido para todos los objetos
         let mut zbuffer = ZBuffer::new(SCREEN_WIDTH as usize, SCREEN_HEIGHT as usize);
         
-        // Renderizamos cada malla con su índice para determinar el color
-        for (idx, model) in models.iter().enumerate() {
-            render(&mut canvas, &mut zbuffer, model, camera_distance, model_translation, model_scale, rotation_y, idx);
+        // ===== RENDERIZAR EL SOL =====
+        for model in sun_models.iter() {
+            render(
+                &mut canvas, 
+                &mut zbuffer, 
+                model, 
+                camera_position,
+                camera_target,
+                sun_translation, 
+                sun_scale, 
+                sun_rotation, 
+                ShaderType::Sun,
+                time
+            );
         }
+        
+        // ===== RENDERIZAR PLANETA ROCOSO (TIERRA) =====
+        for model in rocky_models.iter() {
+            render(
+                &mut canvas, 
+                &mut zbuffer, 
+                model, 
+                camera_position,
+                camera_target,
+                rocky_position + sun_translation,  // Órbita + centrado consistente con el Sol
+                rocky_scale, 
+                rocky_rotation,  // Rotación sobre su eje
+                ShaderType::RockyPlanet,
+                time
+            );
+        }
+        
+        // ===== RENDERIZAR LA LUNA (SATÉLITE DE LA TIERRA) =====
+        for model in rocky_models.iter() {
+            // La Luna orbita la Tierra. La Tierra está en (rocky_position + sun_translation)
+            // La Luna está a moon_relative_position de la Tierra
+            let moon_render_position = (rocky_position + sun_translation) + moon_relative_position;
+            
+            render(
+                &mut canvas, 
+                &mut zbuffer, 
+                model, 
+                camera_position,
+                camera_target,
+                moon_render_position,  // Posición relativa a la Tierra renderizada
+                moon_scale, 
+                moon_rotation,  // Rotación (acoplamiento de marea)
+                ShaderType::Moon,
+                time
+            );
+        }
+        
+        // ===== RENDERIZAR VENUS =====
+        for model in rocky_models.iter() {
+            render(
+                &mut canvas, 
+                &mut zbuffer, 
+                model, 
+                camera_position,
+                camera_target,
+                venus_position + sun_translation,  // Órbita + centrado consistente con el Sol
+                venus_scale, 
+                venus_rotation,  // Rotación sobre su eje (retrógrada)
+                ShaderType::Venus,
+                time
+            );
+        }
+        
+        // ===== RENDERIZAR MARTE =====
+        for model in rocky_models.iter() {
+            render(
+                &mut canvas, 
+                &mut zbuffer, 
+                model, 
+                camera_position,
+                camera_target,
+                mars_position + sun_translation,  // Órbita + centrado consistente con el Sol
+                mars_scale, 
+                mars_rotation,  // Rotación sobre su eje
+                ShaderType::Mars,
+                time
+            );
+        }
+        
+        // ===== RENDERIZAR JÚPITER (GIGANTE GASEOSO) =====
+        for model in rocky_models.iter() {
+            render(
+                &mut canvas, 
+                &mut zbuffer, 
+                model, 
+                camera_position,
+                camera_target,
+                jupiter_position + sun_translation,  // Órbita + centrado consistente con el Sol
+                jupiter_scale, 
+                jupiter_rotation,  // Rotación sobre su eje (muy rápida)
+                ShaderType::Jupiter,
+                time
+            );
+        }
+        
+        // ===== RENDERIZAR URANO (GIGANTE DE HIELO) =====
+        for model in rocky_models.iter() {
+            render(
+                &mut canvas, 
+                &mut zbuffer, 
+                model, 
+                camera_position,
+                camera_target,
+                uranus_position + sun_translation,  // Órbita + centrado consistente con el Sol
+                uranus_scale, 
+                uranus_rotation,  // Rotación sobre su eje
+                ShaderType::Uranus,
+                time
+            );
+        }
+        
+        // ===== RENDERIZAR NEPTUNO (GIGANTE DE HIELO) =====
+        for model in rocky_models.iter() {
+            render(
+                &mut canvas, 
+                &mut zbuffer, 
+                model, 
+                camera_position,
+                camera_target,
+                neptune_position + sun_translation,  // Órbita + centrado consistente con el Sol
+                neptune_scale, 
+                neptune_rotation,  // Rotación sobre su eje
+                ShaderType::Neptune,
+                time
+            );
+        }
+        
+        // ===== RENDERIZAR LA NAVE (COMENTADO) =====
+        // Descomenta esto si cargaste spaceship_models arriba
+        /*
+        for model in spaceship_models.iter() {
+            render(
+                &mut canvas, 
+                &mut zbuffer, 
+                model, 
+                camera_position,
+                camera_target,
+                Vec3::new(5.0, 0.0, 0.0), // Posición a la derecha del sol
+                0.5,  // Escala más pequeña
+                time * 0.2, 
+                ShaderType::Spaceship,
+                time
+            );
+        }
+        */
 
         // Muestra el contenido del buffer en la pantalla
         canvas.present();
