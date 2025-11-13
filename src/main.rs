@@ -11,6 +11,48 @@ use glam::{Vec3, Mat4};
 use std::fs;
 use std::io::Cursor;
 
+
+/// Matriz 4x4 de transformación del modelo
+fn create_model_matrix(world_translation: Vec3, model_center: Vec3, scale: f32, rotation: Vec3) -> Mat4 {
+    let center_matrix = Mat4::from_translation(model_center);
+    
+    let scale_matrix = Mat4::from_scale(Vec3::splat(scale));
+    
+
+    let (sin_x, cos_x) = rotation.x.sin_cos();
+    let (sin_y, cos_y) = rotation.y.sin_cos();
+    let (sin_z, cos_z) = rotation.z.sin_cos();
+    
+    // Matriz de rotación en X
+    let rotation_matrix_x = Mat4::from_cols_array(&[
+        1.0,  0.0,    0.0,   0.0,
+        0.0,  cos_x, -sin_x, 0.0,
+        0.0,  sin_x,  cos_x, 0.0,
+        0.0,  0.0,    0.0,   1.0,
+    ]);
+    
+    // Matriz de rotación en Y
+    let rotation_matrix_y = Mat4::from_cols_array(&[
+        cos_y,  0.0,  sin_y, 0.0,
+        0.0,    1.0,  0.0,   0.0,
+       -sin_y,  0.0,  cos_y, 0.0,
+        0.0,    0.0,  0.0,   1.0,
+    ]);
+    
+    // Matriz de rotación en Z
+    let rotation_matrix_z = Mat4::from_cols_array(&[
+        cos_z, -sin_z, 0.0, 0.0,
+        sin_z,  cos_z, 0.0, 0.0,
+        0.0,    0.0,   1.0, 0.0,
+        0.0,    0.0,   0.0, 1.0,
+    ]);
+    
+    let rotation_matrix = rotation_matrix_z * rotation_matrix_y * rotation_matrix_x;
+    
+    let world_matrix = Mat4::from_translation(world_translation);
+    world_matrix * rotation_matrix * scale_matrix * center_matrix
+}
+
 const SCREEN_WIDTH: u32 = 800;
 const SCREEN_HEIGHT: u32 = 600;
 
@@ -871,13 +913,14 @@ fn render(
     canvas: &mut sdl2::render::Canvas<sdl2::video::Window>, 
     zbuffer: &mut ZBuffer, 
     model: &tobj::Model, 
-    camera_position: Vec3,  // Posición libre de la cámara
-    camera_target: Vec3,    // Objetivo de la cámara
-    model_translation: glam::Vec3, 
-    model_scale: f32, 
-    rotation_y: f32, 
-    shader_type: ShaderType, // Tipo de shader a aplicar
-    time: f32,               // Tiempo para animaciones
+    camera_position: Vec3,     // Posición libre de la cámara
+    camera_target: Vec3,       // Objetivo de la cámara
+    world_position: Vec3,      // Posición en el mundo (posición orbital)
+    model_center: Vec3,        // Centrado del modelo (negativo del centroide)
+    model_scale: f32,          // Escala del modelo
+    rotation_y: f32,           // Rotación en Y
+    shader_type: ShaderType,   // Tipo de shader a aplicar
+    time: f32,                 // Tiempo para animaciones
 ) {
     let positions = &model.mesh.positions;
     let indices = &model.mesh.indices;
@@ -891,10 +934,15 @@ fn render(
         Vec3::Y,          // Vector "arriba"
     );
     
-    // Matriz del modelo: primero rotar en Y, luego trasladar para centrar y escalar
-    let model_matrix = Mat4::from_scale(Vec3::splat(model_scale)) 
-        * Mat4::from_translation(model_translation)
-        * Mat4::from_rotation_y(rotation_y);
+    // Matriz del modelo usando el orden correcto: T_world * R * S * T_center
+    // Rotación solo en Y (0, rotation_y, 0)
+    let rotation_vec = Vec3::new(0.0, rotation_y, 0.0);
+    let model_matrix = create_model_matrix(
+        world_position,     // Posición en el mundo (posición orbital)
+        model_center,       // Centrado del modelo
+        model_scale,        // Escala
+        rotation_vec        // Rotación
+    );
 
     // Matriz final Modelo-Vista-Proyección
     let mvp = projection * view * model_matrix;
@@ -1103,54 +1151,54 @@ fn main() -> Result<(), String> {
     // ===== ROTACIÓN Y TRASLACIÓN DEL PLANETA ROCOSO (TIERRA) =====
     let mut rocky_rotation = 0.0_f32;      // Rotación sobre su eje
     let mut rocky_orbit_angle = 0.0_f32;   // Ángulo orbital alrededor del sol
-    let rocky_orbit_radius = 8000.0_f32;   // Radio de la órbita (8000 unidades del sol - antes 5000 + 3000)
-    let rocky_orbit_speed = 0.0006_f32;    // Velocidad orbital ajustada para 8000
+    let rocky_orbit_radius = 30.0_f32;     // 30 unidades del sol (mucho más cerca)
+    let rocky_orbit_speed = 0.006_f32;     // Velocidad orbital ajustada
     let rocky_rotation_speed = 0.01_f32;   // Velocidad de rotación sobre su eje (más visible)
     
     // ===== ROTACIÓN Y TRASLACIÓN DE VENUS =====
     let mut venus_rotation = 0.0_f32;      // Rotación sobre su eje (muy lenta y retrógrada)
     let mut venus_orbit_angle = std::f32::consts::PI * 0.5; // Posición inicial diferente
-    let venus_orbit_radius = 6000.0_f32;   // Más cerca que la Tierra (antes 3000 + 3000)
-    let venus_orbit_speed = 0.0008_f32;    // Más rápido que la Tierra (más cerca del sol)
+    let venus_orbit_radius = 22.0_f32;     // 22 unidades del sol (más cerca que la Tierra)
+    let venus_orbit_speed = 0.008_f32;     // Más rápido que la Tierra (más cerca del sol)
     let venus_rotation_speed = -0.002_f32; // Rotación retrógrada (negativa) y muy lenta
     let venus_scale = if max_r > 0.0 { 1.9 / max_r } else { 1.0 }; // Casi del tamaño de la Tierra
     
     // ===== ROTACIÓN Y TRASLACIÓN DE MARTE =====
     let mut mars_rotation = 0.0_f32;       // Rotación sobre su eje
     let mut mars_orbit_angle = std::f32::consts::PI; // Empezar en lado opuesto
-    let mars_orbit_radius = 10000.0_f32;   // Más lejos que la Tierra (antes 7000 + 3000)
-    let mars_orbit_speed = 0.0004_f32;     // Más lento que la Tierra (más lejos del sol)
+    let mars_orbit_radius = 40.0_f32;      // 40 unidades del sol (más lejos que la Tierra)
+    let mars_orbit_speed = 0.004_f32;      // Más lento que la Tierra (más lejos del sol)
     let mars_rotation_speed = 0.0098_f32;  // Rotación similar a la Tierra
     let mars_scale = if max_r > 0.0 { 1.5 / max_r } else { 1.0 }; // Más pequeño que la Tierra
     
     // ===== ROTACIÓN Y TRASLACIÓN DE JÚPITER (GIGANTE GASEOSO) =====
     let mut jupiter_rotation = 0.0_f32;    // Rotación sobre su eje (muy rápida)
     let mut jupiter_orbit_angle = std::f32::consts::PI * 1.5; // Posición inicial
-    let jupiter_orbit_radius = 13000.0_f32; // 3000 unidades más lejos que Marte
-    let jupiter_orbit_speed = 0.0002_f32;  // Muy lento (más lejos del sol)
+    let jupiter_orbit_radius = 55.0_f32;   // 55 unidades del sol
+    let jupiter_orbit_speed = 0.002_f32;   // Muy lento (más lejos del sol)
     let jupiter_rotation_speed = 0.02_f32; // Rotación rápida (Júpiter rota en ~10 horas)
     let jupiter_scale = if max_r > 0.0 { 4.0 / max_r } else { 1.0 }; // Mitad del tamaño del Sol (Sol es 8.0)
     
     // ===== ROTACIÓN Y TRASLACIÓN DE URANO (GIGANTE DE HIELO) =====
     let mut uranus_rotation = 0.0_f32;     // Rotación sobre su eje
     let mut uranus_orbit_angle = std::f32::consts::PI * 0.3; // Posición inicial
-    let uranus_orbit_radius = 14000.0_f32; // 1000 unidades más lejos que Júpiter
-    let uranus_orbit_speed = 0.00015_f32;  // Muy lento
+    let uranus_orbit_radius = 70.0_f32;    // 70 unidades del sol
+    let uranus_orbit_speed = 0.0015_f32;   // Muy lento
     let uranus_rotation_speed = 0.015_f32; // Rotación media
     let uranus_scale = if max_r > 0.0 { 3.0 / max_r } else { 1.0 }; // Más pequeño que Júpiter
     
     // ===== ROTACIÓN Y TRASLACIÓN DE NEPTUNO (GIGANTE DE HIELO) =====
     let mut neptune_rotation = 0.0_f32;    // Rotación sobre su eje
     let mut neptune_orbit_angle = std::f32::consts::PI * 0.8; // Posición inicial
-    let neptune_orbit_radius = 15000.0_f32; // 1000 unidades más lejos que Urano
-    let neptune_orbit_speed = 0.0001_f32;  // Muy muy lento (más lejano)
+    let neptune_orbit_radius = 85.0_f32;   // 85 unidades del sol (el más lejano)
+    let neptune_orbit_speed = 0.001_f32;   // Muy muy lento (más lejano)
     let neptune_rotation_speed = 0.016_f32; // Rotación media-rápida
     let neptune_scale = if max_r > 0.0 { 2.8 / max_r } else { 1.0 }; // Similar a Urano
     
     // ===== ROTACIÓN Y TRASLACIÓN DE LA LUNA (SATÉLITE DE LA TIERRA) =====
     let mut moon_rotation = 0.0_f32;       // Rotación sobre su eje (acoplamiento de marea)
     let mut moon_orbit_angle = 0.0_f32;    // Ángulo orbital alrededor de la Tierra
-    let moon_orbit_radius = 200.0_f32;     // 200.0 unidades de la Tierra (mucho más visible)
+    let moon_orbit_radius = 5.0_f32;       // 5 unidades de la Tierra (proporcionalmente cercana)
     let moon_orbit_speed = 0.05_f32;       // Velocidad orbital (completa órbita en ~2 minutos)
     let moon_rotation_speed = 0.05_f32;    // Misma que orbital (acoplamiento de marea - siempre muestra misma cara)
     let moon_scale = if max_r > 0.0 { 0.7 / max_r } else { 1.0 }; // Tamaño apropiado (0.7 - más pequeña que Tierra)
@@ -1350,7 +1398,8 @@ fn main() -> Result<(), String> {
                 model, 
                 camera_position,
                 camera_target,
-                sun_translation, 
+                Vec3::ZERO,      // El sol está en el origen del mundo
+                sun_translation, // Centrado del modelo del sol
                 sun_scale, 
                 sun_rotation, 
                 ShaderType::Sun,
@@ -1366,7 +1415,8 @@ fn main() -> Result<(), String> {
                 model, 
                 camera_position,
                 camera_target,
-                rocky_position + sun_translation,  // Órbita + centrado consistente con el Sol
+                rocky_position,  // Posición orbital de la Tierra
+                sun_translation, // Usar el mismo centrado que el sol (misma geometría)
                 rocky_scale, 
                 rocky_rotation,  // Rotación sobre su eje
                 ShaderType::RockyPlanet,
@@ -1376,9 +1426,9 @@ fn main() -> Result<(), String> {
         
         // ===== RENDERIZAR LA LUNA (SATÉLITE DE LA TIERRA) =====
         for model in rocky_models.iter() {
-            // La Luna orbita la Tierra. La Tierra está en (rocky_position + sun_translation)
+            // La Luna orbita la Tierra. La Tierra está en rocky_position
             // La Luna está a moon_relative_position de la Tierra
-            let moon_render_position = (rocky_position + sun_translation) + moon_relative_position;
+            let moon_world_position = rocky_position + moon_relative_position;
             
             render(
                 &mut canvas, 
@@ -1386,7 +1436,8 @@ fn main() -> Result<(), String> {
                 model, 
                 camera_position,
                 camera_target,
-                moon_render_position,  // Posición relativa a la Tierra renderizada
+                moon_world_position, // Posición de la Luna en el mundo
+                sun_translation,     // Usar el mismo centrado (misma geometría)
                 moon_scale, 
                 moon_rotation,  // Rotación (acoplamiento de marea)
                 ShaderType::Moon,
@@ -1402,7 +1453,8 @@ fn main() -> Result<(), String> {
                 model, 
                 camera_position,
                 camera_target,
-                venus_position + sun_translation,  // Órbita + centrado consistente con el Sol
+                venus_position,  // Posición orbital de Venus
+                sun_translation, // Usar el mismo centrado (misma geometría)
                 venus_scale, 
                 venus_rotation,  // Rotación sobre su eje (retrógrada)
                 ShaderType::Venus,
@@ -1418,9 +1470,10 @@ fn main() -> Result<(), String> {
                 model, 
                 camera_position,
                 camera_target,
-                mars_position + sun_translation,  // Órbita + centrado consistente con el Sol
+                mars_position,   // Posición orbital de Marte
+                sun_translation, // Usar el mismo centrado (misma geometría)
                 mars_scale, 
-                mars_rotation,  // Rotación sobre su eje
+                mars_rotation,   // Rotación sobre su eje
                 ShaderType::Mars,
                 time
             );
@@ -1434,9 +1487,10 @@ fn main() -> Result<(), String> {
                 model, 
                 camera_position,
                 camera_target,
-                jupiter_position + sun_translation,  // Órbita + centrado consistente con el Sol
+                jupiter_position, // Posición orbital de Júpiter
+                sun_translation,  // Usar el mismo centrado (misma geometría)
                 jupiter_scale, 
-                jupiter_rotation,  // Rotación sobre su eje (muy rápida)
+                jupiter_rotation, // Rotación sobre su eje (muy rápida)
                 ShaderType::Jupiter,
                 time
             );
@@ -1450,9 +1504,10 @@ fn main() -> Result<(), String> {
                 model, 
                 camera_position,
                 camera_target,
-                uranus_position + sun_translation,  // Órbita + centrado consistente con el Sol
+                uranus_position, // Posición orbital de Urano
+                sun_translation, // Usar el mismo centrado (misma geometría)
                 uranus_scale, 
-                uranus_rotation,  // Rotación sobre su eje
+                uranus_rotation, // Rotación sobre su eje
                 ShaderType::Uranus,
                 time
             );
@@ -1466,9 +1521,10 @@ fn main() -> Result<(), String> {
                 model, 
                 camera_position,
                 camera_target,
-                neptune_position + sun_translation,  // Órbita + centrado consistente con el Sol
+                neptune_position, // Posición orbital de Neptuno
+                sun_translation,  // Usar el mismo centrado (misma geometría)
                 neptune_scale, 
-                neptune_rotation,  // Rotación sobre su eje
+                neptune_rotation, // Rotación sobre su eje
                 ShaderType::Neptune,
                 time
             );
