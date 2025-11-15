@@ -4,9 +4,12 @@ extern crate glam;
 
 use sdl2::pixels::Color;
 use sdl2::event::Event;
-use sdl2::keyboard::Keycode;
+use sdl2::keyboard::{Keycode, Scancode};
 use sdl2::rect::Point;
 use glam::{Vec3, Mat4};
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
+use std::time::Instant;
  
 use std::fs;
 use std::io::Cursor;
@@ -1028,6 +1031,17 @@ fn main() -> Result<(), String> {
     // Crea un canvas para dibujar
     let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
 
+    // Generar campo de estrellas (skybox procedural) una sola vez
+    const STAR_COUNT: usize = 800;
+    let mut rng = StdRng::seed_from_u64(0xC0FFEE);
+    let mut stars: Vec<(i32, i32, u8)> = Vec::with_capacity(STAR_COUNT);
+    for _ in 0..STAR_COUNT {
+        let x = rng.gen_range(0..SCREEN_WIDTH as i32);
+        let y = rng.gen_range(0..SCREEN_HEIGHT as i32);
+        let b = rng.gen_range(120..256) as u8; // brillo
+        stars.push((x, y, b));
+    }
+
     // ===== CARGA DEL SOL (sphere.obj) =====
     let sun_content = fs::read_to_string("sphere.obj")
         .expect("No se pudo leer sphere.obj");
@@ -1131,18 +1145,24 @@ fn main() -> Result<(), String> {
             if d > max_r { max_r = d; }
         }
     }
-    let sun_scale = if max_r > 0.0 { 8.0 / max_r } else { 1.0 }; // Sol el doble de grande (8.0)
+    // Doblar escalas: multiplicar por 2 los factores para todos los cuerpos
+    let sun_scale = if max_r > 0.0 { 16.0 / max_r } else { 1.0 }; // Sol (antes 8.0, ahora 16.0)
     let sun_translation = -sun_centroid;
 
     // Configuración del planeta rocoso (Tierra) - MISMO TAMAÑO QUE ANTES
-    let rocky_scale = if max_r > 0.0 { 2.0 / max_r } else { 1.0 }; // Mitad del tamaño del sol
+    let rocky_scale = if max_r > 0.0 { 4.0 / max_r } else { 1.0 }; // Tierra (antes 2.0 -> ahora 4.0)
 
     let mut event_pump = sdl_context.event_pump()?;
+    // Activar modo relativo del ratón para control tipo "mouselook"
+    let mouse_subsystem = sdl_context.mouse();
+    let _ = mouse_subsystem.set_relative_mouse_mode(true);
+    // Track time for smooth movement
+    let mut last_instant = Instant::now();
     
     // ===== SISTEMA DE CÁMARA LIBRE =====
-    // Cámara cerca del sol para empezar la exploración
-    let mut camera_position = Vec3::new(0.0, 5.0, 15.0); // Cerca del sol
-    let mut camera_yaw = 0.0f32; // Mirando hacia adelante
+    // Cámara posicionada más lejos para evitar colisiones iniciales tras cambios de escala
+    let mut camera_position = Vec3::new(0.0, 60.0, 400.0); // Alejada del sol para permitir WASD
+    let camera_yaw = 0.0f32; // Mirando hacia adelante (no usado para yaw, solo para dirección inicial)
     let mut camera_pitch = 0.0f32; // Horizonte
     
     // ===== ROTACIÓN DEL SOL =====
@@ -1151,136 +1171,139 @@ fn main() -> Result<(), String> {
     // ===== ROTACIÓN Y TRASLACIÓN DEL PLANETA ROCOSO (TIERRA) =====
     let mut rocky_rotation = 0.0_f32;      // Rotación sobre su eje
     let mut rocky_orbit_angle = 0.0_f32;   // Ángulo orbital alrededor del sol
-    let rocky_orbit_radius = 30.0_f32;     // 30 unidades del sol (mucho más cerca)
+    // Aumentado 200% adicional (triplicado) respecto al valor previo
+    let rocky_orbit_radius = 45.0_f32 * 3.0;     // antes 45.0 -> ahora 135.0
     let rocky_orbit_speed = 0.006_f32;     // Velocidad orbital ajustada
     let rocky_rotation_speed = 0.01_f32;   // Velocidad de rotación sobre su eje (más visible)
     
     // ===== ROTACIÓN Y TRASLACIÓN DE VENUS =====
     let mut venus_rotation = 0.0_f32;      // Rotación sobre su eje (muy lenta y retrógrada)
     let mut venus_orbit_angle = std::f32::consts::PI * 0.5; // Posición inicial diferente
-    let venus_orbit_radius = 22.0_f32;     // 22 unidades del sol (más cerca que la Tierra)
+    let venus_orbit_radius = 33.0_f32 * 3.0;     // antes 33.0 -> ahora 99.0
     let venus_orbit_speed = 0.008_f32;     // Más rápido que la Tierra (más cerca del sol)
     let venus_rotation_speed = -0.002_f32; // Rotación retrógrada (negativa) y muy lenta
-    let venus_scale = if max_r > 0.0 { 1.9 / max_r } else { 1.0 }; // Casi del tamaño de la Tierra
+    let venus_scale = if max_r > 0.0 { 3.8 / max_r } else { 1.0 }; // Casi del tamaño de la Tierra (doble)
     
     // ===== ROTACIÓN Y TRASLACIÓN DE MARTE =====
     let mut mars_rotation = 0.0_f32;       // Rotación sobre su eje
     let mut mars_orbit_angle = std::f32::consts::PI; // Empezar en lado opuesto
-    let mars_orbit_radius = 40.0_f32;      // 40 unidades del sol (más lejos que la Tierra)
+    let mars_orbit_radius = 60.0_f32 * 3.0;      // antes 60.0 -> ahora 180.0
     let mars_orbit_speed = 0.004_f32;      // Más lento que la Tierra (más lejos del sol)
     let mars_rotation_speed = 0.0098_f32;  // Rotación similar a la Tierra
-    let mars_scale = if max_r > 0.0 { 1.5 / max_r } else { 1.0 }; // Más pequeño que la Tierra
+    let mars_scale = if max_r > 0.0 { 3.0 / max_r } else { 1.0 }; // Más pequeño que la Tierra (doble)
     
     // ===== ROTACIÓN Y TRASLACIÓN DE JÚPITER (GIGANTE GASEOSO) =====
     let mut jupiter_rotation = 0.0_f32;    // Rotación sobre su eje (muy rápida)
     let mut jupiter_orbit_angle = std::f32::consts::PI * 1.5; // Posición inicial
-    let jupiter_orbit_radius = 55.0_f32;   // 55 unidades del sol
+    let jupiter_orbit_radius = 82.5_f32 * 3.0;   // antes 82.5 -> ahora 247.5
     let jupiter_orbit_speed = 0.002_f32;   // Muy lento (más lejos del sol)
     let jupiter_rotation_speed = 0.02_f32; // Rotación rápida (Júpiter rota en ~10 horas)
-    let jupiter_scale = if max_r > 0.0 { 4.0 / max_r } else { 1.0 }; // Mitad del tamaño del Sol (Sol es 8.0)
+    let jupiter_scale = if max_r > 0.0 { 8.0 / max_r } else { 1.0 }; // Mitad del tamaño del Sol (doble)
     
     // ===== ROTACIÓN Y TRASLACIÓN DE URANO (GIGANTE DE HIELO) =====
     let mut uranus_rotation = 0.0_f32;     // Rotación sobre su eje
     let mut uranus_orbit_angle = std::f32::consts::PI * 0.3; // Posición inicial
-    let uranus_orbit_radius = 70.0_f32;    // 70 unidades del sol
+    let uranus_orbit_radius = 105.0_f32 * 3.0;   // antes 105.0 -> ahora 315.0
     let uranus_orbit_speed = 0.0015_f32;   // Muy lento
     let uranus_rotation_speed = 0.015_f32; // Rotación media
-    let uranus_scale = if max_r > 0.0 { 3.0 / max_r } else { 1.0 }; // Más pequeño que Júpiter
+    let uranus_scale = if max_r > 0.0 { 6.0 / max_r } else { 1.0 }; // Más pequeño que Júpiter (doble)
     
     // ===== ROTACIÓN Y TRASLACIÓN DE NEPTUNO (GIGANTE DE HIELO) =====
     let mut neptune_rotation = 0.0_f32;    // Rotación sobre su eje
     let mut neptune_orbit_angle = std::f32::consts::PI * 0.8; // Posición inicial
-    let neptune_orbit_radius = 85.0_f32;   // 85 unidades del sol (el más lejano)
+    let neptune_orbit_radius = 127.5_f32 * 3.0;  // antes 127.5 -> ahora 382.5
     let neptune_orbit_speed = 0.001_f32;   // Muy muy lento (más lejano)
     let neptune_rotation_speed = 0.016_f32; // Rotación media-rápida
-    let neptune_scale = if max_r > 0.0 { 2.8 / max_r } else { 1.0 }; // Similar a Urano
+    let neptune_scale = if max_r > 0.0 { 5.6 / max_r } else { 1.0 }; // Similar a Urano (doble)
     
     // ===== ROTACIÓN Y TRASLACIÓN DE LA LUNA (SATÉLITE DE LA TIERRA) =====
     let mut moon_rotation = 0.0_f32;       // Rotación sobre su eje (acoplamiento de marea)
     let mut moon_orbit_angle = 0.0_f32;    // Ángulo orbital alrededor de la Tierra
-    let moon_orbit_radius = 5.0_f32;       // 5 unidades de la Tierra (proporcionalmente cercana)
+    let moon_orbit_radius = 5.0_f32 * 3.0;       // antes 5.0 -> ahora 15.0 (mantener proporcionalidad)
     let moon_orbit_speed = 0.05_f32;       // Velocidad orbital (completa órbita en ~2 minutos)
     let moon_rotation_speed = 0.05_f32;    // Misma que orbital (acoplamiento de marea - siempre muestra misma cara)
-    let moon_scale = if max_r > 0.0 { 0.7 / max_r } else { 1.0 }; // Tamaño apropiado (0.7 - más pequeña que Tierra)
+    let moon_scale = if max_r > 0.0 { 1.4 / max_r } else { 1.0 }; // Tamaño apropiado (doble)
     
     // ===== TIEMPO PARA ANIMACIONES =====
     let mut time = 0.0f32;
 
     'running: loop {
+        // movement_delta se calculará después del bucle de eventos usando el estado del teclado
+
         // Manejo de eventos (como cerrar la ventana)
+        // Acumulador de desplazamiento horizontal del ratón (pixels) por frame
+        let mut mouse_dx = 0.0_f32;
         for event in event_pump.poll_iter() {
             match event {
                 Event::Quit {..} |
                 Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
                     break 'running
                 },
-                // ===== MOVIMIENTO DE CÁMARA LIBRE =====
-                Event::KeyDown { keycode: Some(Keycode::W), .. } => {
-                    // Adelante (movimiento libre en dirección de la cámara)
-                    let forward = Vec3::new(
-                        camera_yaw.sin() * camera_pitch.cos(),
-                        camera_pitch.sin(),
-                        camera_yaw.cos() * camera_pitch.cos()
-                    );
-                    camera_position += forward * 5.0; // Reducido de 50.0 a 5.0
-                },
-                Event::KeyDown { keycode: Some(Keycode::S), .. } => {
-                    // Atrás
-                    let forward = Vec3::new(
-                        camera_yaw.sin() * camera_pitch.cos(),
-                        camera_pitch.sin(),
-                        camera_yaw.cos() * camera_pitch.cos()
-                    );
-                    camera_position -= forward * 5.0; // Reducido de 50.0 a 5.0
-                },
-                Event::KeyDown { keycode: Some(Keycode::A), .. } => {
-                    // Izquierda (strafe)
-                    let right = Vec3::new(
-                        camera_yaw.cos(),
-                        0.0,
-                        -camera_yaw.sin()
-                    );
-                    camera_position -= right * 5.0; // Reducido de 50.0 a 5.0
-                },
-                Event::KeyDown { keycode: Some(Keycode::D), .. } => {
-                    // Derecha (strafe)
-                    let right = Vec3::new(
-                        camera_yaw.cos(),
-                        0.0,
-                        -camera_yaw.sin()
-                    );
-                    camera_position += right * 5.0; // Reducido de 50.0 a 5.0
-                },
-                Event::KeyDown { keycode: Some(Keycode::Space), .. } => {
-                    // Arriba
-                    camera_position.y += 2.5; // Reducido de 25.0 a 2.5
-                },
-                Event::KeyDown { keycode: Some(Keycode::LShift), .. } => {
-                    // Abajo
-                    camera_position.y -= 2.5; // Reducido de 25.0 a 2.5
-                },
-                Event::KeyDown { keycode: Some(Keycode::Left), .. } => {
-                    // Rotar cámara a la izquierda
-                    camera_yaw -= 0.02; // Reducido de 0.1 a 0.02
-                },
-                Event::KeyDown { keycode: Some(Keycode::Right), .. } => {
-                    // Rotar cámara a la derecha
-                    camera_yaw += 0.02; // Reducido de 0.1 a 0.02
-                },
-                Event::KeyDown { keycode: Some(Keycode::Up), .. } => {
-                    // Rotar cámara arriba
-                    camera_pitch = (camera_pitch + 0.02).min(std::f32::consts::FRAC_PI_2 - 0.1); // Reducido de 0.1 a 0.02
-                },
-                Event::KeyDown { keycode: Some(Keycode::Down), .. } => {
-                    // Rotar cámara abajo
-                    camera_pitch = (camera_pitch - 0.02).max(-std::f32::consts::FRAC_PI_2 + 0.1); // Reducido de 0.1 a 0.02
+                Event::MouseMotion { xrel, yrel, .. } => {
+                    // Acumular desplazamiento horizontal para movimiento lateral
+                    mouse_dx += xrel as f32;
+                    // Solo usar movimiento vertical del ratón para ajustar pitch (mouselook Y)
+                    // Sensibilidad aumentada respecto a la anterior pero menor que el valor original
+                    let look_sensitivity = 0.0020_f32; // ajustar según petición
+                    camera_pitch += -(yrel as f32) * look_sensitivity; // invertir Y para control natural
+                    // Limitar pitch para evitar invertir la cámara
+                    let max_pitch = std::f32::consts::FRAC_PI_2 - 0.01;
+                    if camera_pitch > max_pitch { camera_pitch = max_pitch; }
+                    if camera_pitch < -max_pitch { camera_pitch = -max_pitch; }
                 },
                 _ => {}
             }
         }
 
-        // Actualizar tiempo para animaciones
-        time += 0.016; // ~60 FPS
+        // Calcular dt desde el frame anterior y actualizar tiempo para animaciones
+        let now = Instant::now();
+        let dt = (now - last_instant).as_secs_f32();
+        last_instant = now;
+        // Evitar dt demasiado grande
+        let dt = dt.min(0.05);
+        time += dt;
+
+        // Movimiento continuo con WASD + espacio/shift (mouse controla la orientación)
+        let keystate = event_pump.keyboard_state();
+        let speed = 20.0_f32; // unidades por segundo
+        let vertical_speed = 10.0_f32;
+
+        let forward = Vec3::new(
+            camera_yaw.sin() * camera_pitch.cos(),
+            camera_pitch.sin(),
+            camera_yaw.cos() * camera_pitch.cos(),
+        );
+        let right = Vec3::new(camera_yaw.cos(), 0.0, -camera_yaw.sin());
+
+        let mut mv = Vec3::ZERO;
+        // Swap W and S per user request: W moves backward, S moves forward (inverse mapping)
+        if keystate.is_scancode_pressed(Scancode::W) {
+            mv -= forward * speed * dt; // W -> backward
+        }
+        if keystate.is_scancode_pressed(Scancode::S) {
+            mv += forward * speed * dt; // S -> forward
+        }
+        if keystate.is_scancode_pressed(Scancode::A) {
+            mv -= right * speed * dt;
+        }
+        if keystate.is_scancode_pressed(Scancode::D) {
+            mv += right * speed * dt;
+        }
+        if keystate.is_scancode_pressed(Scancode::Space) {
+            mv.y += vertical_speed * dt;
+        }
+        if keystate.is_scancode_pressed(Scancode::LShift) {
+            mv.y -= vertical_speed * dt;
+        }
+
+        // Añadir movimiento lateral controlado por el mouse (derecha/izquierda)
+        let mouse_sensitivity = 0.08_f32; // unidades por pixel (aumentada para mover más rápido al desplazarse)
+        if mouse_dx.abs() > 0.0 {
+            mv += right * (mouse_dx * mouse_sensitivity);
+        }
+
+        // Asignar movement_delta calculado
+        let movement_delta = mv;
         
         // Rotación automática del sol
         sun_rotation += 0.005;
@@ -1376,7 +1399,58 @@ fn main() -> Result<(), String> {
             moon_orbit_radius * moon_orbit_angle.sin()
         );
 
-        // Calcular el objetivo de la cámara basado en yaw y pitch
+        // Aplicar movimiento acumulado `movement_delta` con comprobación de colisiones
+        // Primero calculamos posiciones relevantes (las órbitas ya fueron calculadas arriba)
+
+        // Posiciones en el mundo de cada cuerpo
+        let sun_center = Vec3::ZERO;
+        let earth_center = rocky_position; // Tierra
+        let venus_center = venus_position;
+        let mars_center = mars_position;
+        let jupiter_center = jupiter_position;
+        let uranus_center = uranus_position;
+        let neptune_center = neptune_position;
+        let moon_center = earth_center + moon_relative_position;
+
+        // Cámara: radio de colisión (tolerancia)
+        let camera_radius = 1.0_f32;
+
+        // Función helper inline para probar colisión con una esfera
+        let collides = |pos: Vec3, radius: f32, target: Vec3| -> bool {
+            (pos - target).length() < (radius + camera_radius)
+        };
+
+        // Proyecto la nueva posición
+        let proposed = camera_position + movement_delta;
+
+        // Lista de cuerpos con su radio aproximado (scale * max_r)
+        let mut collision = false;
+
+        // Nota: `max_r` es el radio del modelo original calculado al inicio de `main`.
+        let bodies = [
+            (sun_center, sun_scale),
+            (earth_center, rocky_scale),
+            (venus_center, venus_scale),
+            (mars_center, mars_scale),
+            (jupiter_center, jupiter_scale),
+            (uranus_center, uranus_scale),
+            (neptune_center, neptune_scale),
+            (moon_center, moon_scale),
+        ];
+
+        for (center, scale) in bodies.iter() {
+            let radius_world = *scale * max_r;
+            if collides(*center, radius_world, proposed) {
+                collision = true;
+                break;
+            }
+        }
+
+        if !collision {
+            camera_position = proposed;
+        }
+
+        // Calcular el objetivo de la cámara basado en yaw y pitch (después de moverla)
         let camera_target = camera_position + Vec3::new(
             camera_yaw.sin() * camera_pitch.cos(),
             camera_pitch.sin(),
@@ -1386,7 +1460,58 @@ fn main() -> Result<(), String> {
         // Limpia la pantalla con color negro (espacio)
         canvas.set_draw_color(Color::RGB(0, 0, 0));
         canvas.clear();
-        
+
+        // Dibujar skybox procedural: estrellas
+        for (x, y, b) in stars.iter() {
+            canvas.set_draw_color(Color::RGB(*b, *b, *b));
+            let _ = canvas.draw_point(Point::new(*x, *y));
+        }
+
+        // Dibujar órbitas proyectadas en pantalla
+        {
+            let projection = Mat4::perspective_rh_gl(std::f32::consts::FRAC_PI_4, SCREEN_WIDTH as f32 / SCREEN_HEIGHT as f32, 1.0, 50000.0);
+            let view = Mat4::look_at_rh(camera_position, camera_target, Vec3::Y);
+
+            let mut draw_orbit = |radius: f32, center: Vec3, col: Color| {
+                let segments = 128usize;
+                let mut prev: Option<(i32,i32)> = None;
+                for i in 0..=segments {
+                    let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
+                    let world_point = center + Vec3::new(radius * theta.cos(), 0.0, radius * theta.sin());
+                    let p = projection * view * world_point.extend(1.0);
+                    // Skip extreme / behind-camera projections to avoid giant lines when very close
+                    if p.w.abs() < 1e-4 { prev = None; continue; }
+                    let nx = p.x / p.w;
+                    let ny = p.y / p.w;
+                    // If normalized coords are absurdly large, skip to avoid artifacts
+                    if nx.abs() > 100.0 || ny.abs() > 100.0 { prev = None; continue; }
+                    // Map to screen
+                    let sx = ((nx + 1.0) * 0.5 * SCREEN_WIDTH as f32) as i32;
+                    let sy = ((1.0 - (ny + 1.0) * 0.5) * SCREEN_HEIGHT as f32) as i32;
+                    if let Some((px, py)) = prev {
+                        // Only draw if both points are reasonably on/near screen bounds
+                        if (px >= -200 && px <= SCREEN_WIDTH as i32 + 200) && (py >= -200 && py <= SCREEN_HEIGHT as i32 + 200) &&
+                           (sx >= -200 && sx <= SCREEN_WIDTH as i32 + 200) && (sy >= -200 && sy <= SCREEN_HEIGHT as i32 + 200) {
+                            let _ = canvas.set_draw_color(col);
+                            let _ = canvas.draw_line(Point::new(px, py), Point::new(sx, sy));
+                        }
+                    }
+                    prev = Some((sx, sy));
+                }
+            };
+
+            // Órbitas de los planetas alrededor del Sol
+            draw_orbit(rocky_orbit_radius, Vec3::ZERO, Color::RGB(90, 90, 90));
+            draw_orbit(venus_orbit_radius, Vec3::ZERO, Color::RGB(90, 80, 70));
+            draw_orbit(mars_orbit_radius, Vec3::ZERO, Color::RGB(100, 60, 60));
+            draw_orbit(jupiter_orbit_radius, Vec3::ZERO, Color::RGB(80, 80, 100));
+            draw_orbit(uranus_orbit_radius, Vec3::ZERO, Color::RGB(70, 90, 100));
+            draw_orbit(neptune_orbit_radius, Vec3::ZERO, Color::RGB(60, 80, 120));
+
+            // Órbita de la Luna alrededor de la Tierra
+            draw_orbit(moon_orbit_radius, earth_center, Color::RGB(120, 120, 120));
+        }
+
         // Crear un z-buffer compartido para todos los objetos
         let mut zbuffer = ZBuffer::new(SCREEN_WIDTH as usize, SCREEN_HEIGHT as usize);
         
