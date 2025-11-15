@@ -793,14 +793,44 @@ fn apply_shader(
         },
         
         ShaderType::Spaceship => {
-            // ===== SHADER ORIGINAL DE LA NAVE (COMENTADO PERO FUNCIONAL) =====
-            // Este código está mantenido para referencia pero no se usa por defecto
-            // Para activarlo, cambiar el shader_type en la carga del modelo
+            // ===== SHADER DE LA NAVE CON COLORES PROCEDURALES =====
+            // Esquema de colores militar/táctico basado en posición del vértice
             
-            // Por ahora retornamos un color gris básico
-            let r = (150.0 * (0.7 + 0.3 * intensity)).min(255.0);
-            let g = (150.0 * (0.7 + 0.3 * intensity)).min(255.0);
-            let b = (150.0 * (0.7 + 0.3 * intensity)).min(255.0);
+            let avg_y = vertex_position.y;
+            let avg_x = vertex_position.x;
+            let avg_z = vertex_position.z;
+            
+            // Clasificar región del modelo para determinar color base
+            let (base_r, base_g, base_b) = if avg_y > 0.1 && avg_x > -2.0 {
+                // Cockpit/vidrio - parte superior central frontal - VERDE OLIVA MÁS CLARO
+                (160.0, 180.0, 120.0)
+            } else if avg_x > -3.0 {
+                // Parte frontal - Verde oliva claro
+                (140.0, 160.0, 100.0)
+            } else if avg_x < -5.5 {
+                // Parte trasera - Verde oscuro
+                (90.0, 110.0, 70.0)
+            } else if avg_z.abs() > 4.0 {
+                // Laterales del cuerpo - Verde militar medio
+                (115.0, 135.0, 90.0)
+            } else if avg_y > 2.5 {
+                // Protuberancias superiores - Gris claro verdoso
+                (150.0, 155.0, 135.0)
+            } else if avg_z < -5.0 {
+                // Protuberancias traseras profundas - Marrón militar
+                (130.0, 110.0, 75.0)
+            } else if avg_x.abs() > 4.0 {
+                // Protuberancias laterales externas - Gris verdoso
+                (125.0, 130.0, 105.0)
+            } else {
+                // Centro del cuerpo - Verde oliva base
+                (105.0, 125.0, 85.0)
+            };
+            
+            // Aplicar intensidad de luz - MÁS LUZ AMBIENTAL (70% base + 30% direccional)
+            let r = (base_r * (0.7 + 0.3 * intensity)).min(255.0);
+            let g = (base_g * (0.7 + 0.3 * intensity)).min(255.0);
+            let b = (base_b * (0.7 + 0.3 * intensity)).min(255.0);
             
             (r as u8, g as u8, b as u8)
         }
@@ -1017,6 +1047,97 @@ fn render(
     }
 }
 
+/// Versión de render que acepta rotación completa en 3 ejes (para la nave)
+fn render_with_full_rotation(
+    canvas: &mut sdl2::render::Canvas<sdl2::video::Window>, 
+    zbuffer: &mut ZBuffer, 
+    model: &tobj::Model, 
+    camera_position: Vec3,
+    camera_target: Vec3,
+    world_position: Vec3,
+    model_center: Vec3,
+    model_scale: f32,
+    rotation: Vec3,           // Rotación completa (x, y, z)
+    shader_type: ShaderType,
+    time: f32,
+) {
+    let positions = &model.mesh.positions;
+    let indices = &model.mesh.indices;
+
+    let projection = Mat4::perspective_rh_gl(std::f32::consts::FRAC_PI_4, SCREEN_WIDTH as f32 / SCREEN_HEIGHT as f32, 1.0, 50000.0);
+    let view = Mat4::look_at_rh(
+        camera_position,
+        camera_target,
+        Vec3::Y,
+    );
+    
+    // Usar create_model_matrix que acepta Vec3 para rotación completa
+    let model_matrix = create_model_matrix(
+        world_position,
+        model_center,
+        model_scale,
+        rotation
+    );
+
+    let mvp = projection * view * model_matrix;
+
+    for i in (0..indices.len()).step_by(3) {
+        let i0 = indices[i] as usize;
+        let i1 = indices[i + 1] as usize;
+        let i2 = indices[i + 2] as usize;
+
+        let v0 = Vec3::new(positions[3 * i0], positions[3 * i0 + 1], positions[3 * i0 + 2]);
+        let v1 = Vec3::new(positions[3 * i1], positions[3 * i1 + 1], positions[3 * i1 + 2]);
+        let v2 = Vec3::new(positions[3 * i2], positions[3 * i2 + 1], positions[3 * i2 + 2]);
+
+        let p0 = mvp * v0.extend(1.0);
+        let p1 = mvp * v1.extend(1.0);
+        let p2 = mvp * v2.extend(1.0);
+
+        let screen_p0 = Point::new(
+            ((p0.x / p0.w + 1.0) * 0.5 * SCREEN_WIDTH as f32) as i32,
+            ((1.0 - (p0.y / p0.w + 1.0) * 0.5) * SCREEN_HEIGHT as f32) as i32,
+        );
+        let screen_p1 = Point::new(
+            ((p1.x / p1.w + 1.0) * 0.5 * SCREEN_WIDTH as f32) as i32,
+            ((1.0 - (p1.y / p1.w + 1.0) * 0.5) * SCREEN_HEIGHT as f32) as i32,
+        );
+        let screen_p2 = Point::new(
+            ((p2.x / p2.w + 1.0) * 0.5 * SCREEN_WIDTH as f32) as i32,
+            ((1.0 - (p2.y / p2.w + 1.0) * 0.5) * SCREEN_HEIGHT as f32) as i32,
+        );
+
+        let edge1 = v1 - v0;
+        let edge2 = v2 - v0;
+        let normal = edge1.cross(edge2).normalize_or_zero();
+        
+        let light_dir = Vec3::new(0.5, 0.7, 1.0).normalize();
+        let intensity = normal.dot(light_dir).max(0.0);
+        
+        let avg_position = (v0 + v1 + v2) / 3.0;
+        
+        let (r, g, b) = apply_shader(
+            shader_type,
+            avg_position,
+            normal,
+            intensity,
+            time
+        );
+        
+        let z0 = p0.w;
+        let z1 = p1.w;
+        let z2 = p2.w;
+        
+        fill_triangle_zbuffer(
+            canvas,
+            zbuffer,
+            screen_p0, screen_p1, screen_p2,
+            z0, z1, z2,
+            Color::RGB(r, g, b)
+        );
+    }
+}
+
 fn main() -> Result<(), String> {
     // Inicializa SDL2
     let sdl_context = sdl2::init()?;
@@ -1097,9 +1218,7 @@ fn main() -> Result<(), String> {
     let (rocky_models, _) = result.expect("Fallo al cargar sphere.obj para planeta rocoso");
     println!("Planeta rocoso cargado con {} mallas", rocky_models.len());
 
-    // ===== CARGA DE LA NAVE (COMENTADO PERO FUNCIONAL) =====
-    // Descomenta esta sección si quieres ver la nave junto al sol
-    /*
+    // ===== CARGA DE LA NAVE =====
     let spaceship_content = fs::read_to_string("Spaceship/Spaceship.obj")
         .expect("No se pudo leer Spaceship.obj");
     
@@ -1122,7 +1241,30 @@ fn main() -> Result<(), String> {
     
     let (spaceship_models, _) = result.expect("Fallo al cargar Spaceship.obj");
     println!("Nave cargada con {} mallas", spaceship_models.len());
-    */
+    
+    // Calcular centro y escala de la nave
+    let mut ship_sum = Vec3::ZERO;
+    let mut ship_vcount: usize = 0;
+    for model in &spaceship_models {
+        let pos = &model.mesh.positions;
+        for i in (0..pos.len()).step_by(3) {
+            ship_sum += Vec3::new(pos[i], pos[i + 1], pos[i + 2]);
+            ship_vcount += 1;
+        }
+    }
+    let ship_centroid = if ship_vcount > 0 { ship_sum / ship_vcount as f32 } else { Vec3::ZERO };
+
+    let mut ship_max_r = 0.0f32;
+    for model in &spaceship_models {
+        let pos = &model.mesh.positions;
+        for i in (0..pos.len()).step_by(3) {
+            let v = Vec3::new(pos[i], pos[i + 1], pos[i + 2]);
+            let d = (v - ship_centroid).length();
+            if d > ship_max_r { ship_max_r = d; }
+        }
+    }
+    let ship_scale = if ship_max_r > 0.0 { 2.5 / ship_max_r } else { 1.0 };
+    let ship_translation = -ship_centroid;
 
     // Calcular centro y escala del SOL
     let mut sum = Vec3::ZERO;
@@ -1655,24 +1797,43 @@ fn main() -> Result<(), String> {
             );
         }
         
-        // ===== RENDERIZAR LA NAVE (COMENTADO) =====
-        // Descomenta esto si cargaste spaceship_models arriba
-        /*
+        // ===== RENDERIZAR LA NAVE (SIEMPRE ENFRENTE DE LA CÁMARA) =====
+        // Calcular posición de la nave: adelante de la cámara
+        let ship_forward_distance = 8.0; // Distancia delante de la cámara
+        let ship_down_offset = -1.5;     // Offset hacia abajo para que no tape la vista
+        let ship_right_offset = 0.0;     // Sin offset lateral por defecto
+        
+        let up = Vec3::Y;
+        let ship_position = camera_position 
+            + forward * ship_forward_distance 
+            + up * ship_down_offset
+            + right * ship_right_offset;
+        
+        // Rotación completa de la nave para que apunte exactamente donde mira la cámara
+        // Pitch (X): positivo para que la nariz suba/baje correctamente con la cámara
+        // Yaw (Y): rotación horizontal
+        // Roll (Z): mantener en 0 para no inclinar lateralmente
+        let ship_rotation = Vec3::new(
+            camera_pitch,   // Pitch - apunta arriba/abajo (sin invertir)
+            camera_yaw,     // Yaw - apunta izquierda/derecha
+            0.0             // Roll - sin inclinación lateral
+        );
+        
         for model in spaceship_models.iter() {
-            render(
+            render_with_full_rotation(
                 &mut canvas, 
                 &mut zbuffer, 
                 model, 
                 camera_position,
                 camera_target,
-                Vec3::new(5.0, 0.0, 0.0), // Posición a la derecha del sol
-                0.5,  // Escala más pequeña
-                time * 0.2, 
+                ship_position,      // Posición relativa a la cámara
+                ship_translation,   // Centrado del modelo de la nave
+                ship_scale,         // Escala de la nave
+                ship_rotation,      // Rotación completa en 3 ejes
                 ShaderType::Spaceship,
                 time
             );
         }
-        */
 
         // Muestra el contenido del buffer en la pantalla
         canvas.present();
