@@ -1033,9 +1033,11 @@ fn render(
         );
         
         // Dibujar el triángulo directamente con z-buffer
-        let z0 = p0.w;
-        let z1 = p1.w;
-        let z2 = p2.w;
+        // Usar profundidad normalizada y mapeada a [0, 1] para z-buffer correcto
+        // p.z/p.w está en rango [-1, 1], lo mapeamos a [0, 1]
+        let z0 = (p0.z / p0.w + 1.0) * 0.5;
+        let z1 = (p1.z / p1.w + 1.0) * 0.5;
+        let z2 = (p2.z / p2.w + 1.0) * 0.5;
         
         fill_triangle_zbuffer(
             canvas,
@@ -1124,9 +1126,11 @@ fn render_with_full_rotation(
             time
         );
         
-        let z0 = p0.w;
-        let z1 = p1.w;
-        let z2 = p2.w;
+        // Usar profundidad normalizada y mapeada a [0, 1] para z-buffer correcto
+        // p.z/p.w está en rango [-1, 1], lo mapeamos a [0, 1]
+        let z0 = (p0.z / p0.w + 1.0) * 0.5;
+        let z1 = (p1.z / p1.w + 1.0) * 0.5;
+        let z2 = (p2.z / p2.w + 1.0) * 0.5;
         
         fill_triangle_zbuffer(
             canvas,
@@ -1659,7 +1663,7 @@ fn main() -> Result<(), String> {
         
         // ===== RENDERIZAR EL SOL =====
         for model in sun_models.iter() {
-            render(
+            render_with_full_rotation(
                 &mut canvas, 
                 &mut zbuffer, 
                 model, 
@@ -1667,8 +1671,8 @@ fn main() -> Result<(), String> {
                 camera_target,
                 Vec3::ZERO,      // El sol está en el origen del mundo
                 sun_translation, // Centrado del modelo del sol
-                sun_scale, 
-                sun_rotation, 
+                sun_scale,
+                Vec3::new(0.0, sun_rotation, 0.0), // Rotación como Vec3
                 ShaderType::Sun,
                 time
             );
